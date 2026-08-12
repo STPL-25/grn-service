@@ -3,7 +3,6 @@ import { configDotenv } from "dotenv";
 configDotenv();
 
 const JWT_SECRET = process.env.JWT_SECRET;
-
 // Dev bypass: only active when NODE_ENV !== 'production' AND DEV_BYPASS_TOKEN is set
 const DEV_BYPASS_TOKEN = process.env.DEV_BYPASS_TOKEN;
 const DEV_BYPASS_ECNO = process.env.DEV_BYPASS_ECNO || "DEV001";
@@ -14,7 +13,6 @@ function getBearerToken(req) {
 
   const [scheme, token] = authorization.trim().split(/\s+/);
   if (scheme?.toLowerCase() !== "bearer" || !token) return null;
-
   return token;
 }
 
@@ -39,6 +37,7 @@ function getEcnoFromUser(user) {
 const verifyJWT = (req, res, next) => {
   const token = getBearerToken(req);
 
+
   // Dev bypass for Postman/API docs — never active in production
   if (process.env.NODE_ENV !== "production" && DEV_BYPASS_TOKEN && token === DEV_BYPASS_TOKEN) {
     req.user = { ecno: DEV_BYPASS_ECNO, name: "Dev User", role: "dev" };
@@ -56,10 +55,11 @@ const verifyJWT = (req, res, next) => {
     req.user_ecno = getEcnoFromUser(req.user);
     next();
   } catch (error) {
+    console.error("JWT verification error:", error);
     if (error.name === "TokenExpiredError") {
       return res.status(401).json({ success: false, message: "Session expired. Please log in again." });
     }
-    return res.status(401).json({ success: false, message: "Invalid session." });
+    return res.status(401).json({ success: false, message: "Invalid session.", error: error.message });
   }
 };
 

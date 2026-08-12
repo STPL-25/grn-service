@@ -35,7 +35,6 @@ function signSupplierToken(supplier) {
 
 const verifySupplierAuth = (req, res, next) => {
   const token = getBearerToken(req);
-
   if (process.env.NODE_ENV !== "production" && DEV_BYPASS_TOKEN && token === DEV_BYPASS_TOKEN) {
     req.supplier = DEV_BYPASS_SUPPLIER;
     return next();
@@ -47,12 +46,15 @@ const verifySupplierAuth = (req, res, next) => {
 
   try {
     const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] });
+
+       console.log("Decoded JWT payload:", payload); // Debugging line
     if (payload.type !== SUPPLIER_TOKEN_TYPE || !payload.supplier) {
       return res.status(401).json({ success: false, message: "Invalid session." });
     }
     req.supplier = payload.supplier;
     next();
   } catch (error) {
+    console.error("JWT verification error:", error); // Debugging line
     if (error.name === "TokenExpiredError") {
       return res.status(401).json({ success: false, message: "Session expired. Please log in again." });
     }

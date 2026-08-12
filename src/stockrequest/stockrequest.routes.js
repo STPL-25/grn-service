@@ -4,7 +4,8 @@ import StockRequestController from "./stockrequest.controller.js";
 const StockRequestRouter = express.Router();
 
 // Requests (requester + stock incharge share the list endpoint; the
-// requester's page filters with ?requested_by=<own ecno>)
+// requester's page filters with ?requested_by=<own ecno>, which the
+// controller re-derives from the session rather than trusting as-is)
 StockRequestRouter.get("/getRequests",                    StockRequestController.getRequests);
 StockRequestRouter.get("/getRequestItems/:request_sno",   StockRequestController.getRequestItems);
 StockRequestRouter.post("/createRequest",                 StockRequestController.createRequest);

@@ -9,7 +9,7 @@ const GateEntryRouter = express.Router();
 GateEntryRouter.get("/getApprovedPOs", GateEntryController.getApprovedPOs);
 
 // Gate entry register
-// GateEntryRouter.get("/getAllGateEntries",                    GateEntryController.getAllGateEntries);
+GateEntryRouter.get("/getAllGateEntries",                    GateEntryController.getAllGateEntries);
 GateEntryRouter.get("/getGateEntriesByPO/:po_basic_sno",     GateEntryController.getGateEntriesByPO);
 // QR scan-to-fill: dispatch delivery by LR no (or DSD-<delivery_sno> for Direct slips)
 GateEntryRouter.get("/dispatchByLr/:lr_code",                GateEntryController.getDispatchByLr);
@@ -19,5 +19,7 @@ GateEntryRouter.get("/pendingInward",                        GateEntryController
 // it's a no-op for a plain JSON request (no photo), which still hits express.json() upstream.
 GateEntryRouter.post("/createGateEntry",                     upload.any(), GateEntryController.createGateEntry);
 GateEntryRouter.put("/updateGateEntryStatus/:gate_entry_sno", GateEntryController.updateGateEntryStatus);
+// Full-record edit — only allowed while status isn't yet 'GRN Done' (enforced in sp_nt_UpdateGateEntry)
+GateEntryRouter.put("/updateGateEntry/:gate_entry_sno",       upload.any(), GateEntryController.updateGateEntry);
 
 export default GateEntryRouter;

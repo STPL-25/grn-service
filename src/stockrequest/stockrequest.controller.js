@@ -3,6 +3,7 @@ import { invalidateCache } from "../middleware/redisCache.js";
 import { broadcast } from "../utils/socketBroadcast.js";
 
 function getAuthUser(req) {
+  console.log("req.user:", req.user);
   const user = Array.isArray(req.user) ? req.user[0] : req.user;
   return user;
 }
@@ -10,7 +11,17 @@ function getAuthUser(req) {
 class StockRequestController {
   static async getRequests(req, res) {
     try {
-      const data = await StockRequestService.getRequests(req.query);
+      const user = getAuthUser(req);
+      const filters = { ...req.query };
+      // The requester's own list and the stock-incharge "all requests" view
+      // share this endpoint. A client-supplied requested_by is never trusted
+      // as-is — if the caller is filtering to "their own", it is forced to
+      // the authenticated session's ecno so editing the query string can't
+      // pull another employee's requisitions.
+      if (filters.requested_by !== undefined) {
+        filters.requested_by = user?.ecno;
+      }
+      const data = await StockRequestService.getRequests(filters);
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

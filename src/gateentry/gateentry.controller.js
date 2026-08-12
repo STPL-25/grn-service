@@ -20,6 +20,7 @@ class GateEntryController {
 
   static async getAllGateEntries(req, res) {
     try {
+      console.log("Received request to get all gate entries with query:", req.query);
       const data = await GateEntryService.getAllGateEntries(req.query);
       res.json({ success: true, data });
     } catch (error) {
@@ -84,6 +85,34 @@ class GateEntryController {
     try {
       const data = await GateEntryService.getPendingInwardPOs();
       res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async updateGateEntry(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { gate_entry_sno } = req.params;
+      if (!req.body || Object.keys(req.body).length === 0)
+        return res.status(400).json({ success: false, error: "Gate entry data is required" });
+
+      const photoFile = Array.isArray(req.files)
+        ? req.files.find((f) => f.fieldname === "photo") || req.files[0]
+        : undefined;
+      const photo_url = photoFile
+        ? await ftpUploader.uploadFileIfExists(photoFile, "NON_TRADE_DATAS/GATE_ENTRY_PHOTOS")
+        : undefined;
+
+      const data = await GateEntryService.updateGateEntry(Number(gate_entry_sno), {
+        ...req.body,
+        ...(photo_url ? { photo_url } : {}),
+        updated_by: user?.ecno,
+      });
+      await invalidateCache(req.redisClient, "gate:all");
+      await invalidateCacheByPattern(req.redisClient, "gate:by_po:*");
+      broadcast(req.redisClient, "grn:live", "gate_entry:updated", data?.[0]);
+      res.json({ success: true, data, message: "Gate entry updated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }

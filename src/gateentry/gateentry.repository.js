@@ -16,10 +16,9 @@ class GateEntryRepository {
     }
   }
 
-  // Approved POs awaiting receipt — same source as the GRN pending list,
-  // since what arrives at the gate is exactly an approved, not-yet-received PO.
+  // Approved POs that don't have a gate entry yet — a PO only ever gets one.
   async getApprovedPOs(filters = {}) {
-    return this.executeStoredProcedure("sp_nt_GetPendingPOsForGRN", filters);
+    return this.executeStoredProcedure("sp_nt_GetPOsPendingGateEntry", filters);
   }
 
   async getAllGateEntries(filters = {}) {
@@ -33,6 +32,10 @@ class GateEntryRepository {
   async createGateEntry(entryData) {
     console.log("Creating gate entry with data:", entryData);
     return this.executeStoredProcedure("sp_nt_CreateGateEntry", entryData);
+  }
+
+  async updateGateEntry(entryData) {
+    return this.executeStoredProcedure("sp_nt_UpdateGateEntry", entryData);
   }
 
   async updateGateEntryStatus(gate_entry_sno, status, updated_by) {
