@@ -59,7 +59,7 @@ class GateEntryController {
       });
       await invalidateCache(req.redisClient, "gate:all");
       await invalidateCacheByPattern(req.redisClient, "gate:by_po:*");
-      broadcast(req.redisClient, "grn:live", "gate_entry:created", data?.[0]);
+      broadcast("grn:live", "gate_entry:created", data?.[0]);
       res.json({ success: true, data, message: "Gate entry created" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -111,7 +111,7 @@ class GateEntryController {
       });
       await invalidateCache(req.redisClient, "gate:all");
       await invalidateCacheByPattern(req.redisClient, "gate:by_po:*");
-      broadcast(req.redisClient, "grn:live", "gate_entry:updated", data?.[0]);
+      broadcast("grn:live", "gate_entry:updated", data?.[0]);
       res.json({ success: true, data, message: "Gate entry updated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -133,7 +133,7 @@ class GateEntryController {
       );
       await invalidateCache(req.redisClient, "gate:all");
       await invalidateCacheByPattern(req.redisClient, "gate:by_po:*");
-      broadcast(req.redisClient, "grn:live", "gate_entry:status_updated", data?.[0]);
+      broadcast("grn:live", "gate_entry:status_updated", data?.[0]);
       res.json({ success: true, data, message: "Gate entry status updated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

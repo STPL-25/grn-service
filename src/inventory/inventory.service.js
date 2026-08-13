@@ -61,7 +61,7 @@ class InventoryService {
       item.prod_sno,
       item.prod_name,
       item.unit_name,
-      
+      location
     );
     if (!upserted?.item_sno) return null;
 

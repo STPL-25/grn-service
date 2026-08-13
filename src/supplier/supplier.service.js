@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import SupplierRepository from "./supplier.repository.js";
 import { signSupplierToken } from "../middleware/supplierAuth.js";
-import { sendMail, buildSupplierInviteEmail } from "../utils/mailer.js";
+import { sendSupplierInviteEmail } from "../utils/notifyClient.js";
 
 const SALT_ROUNDS = 10;
 const PORTAL_URL = process.env.SUPPLIER_PORTAL_URL || "http://localhost:5173/supplier";
@@ -30,15 +30,13 @@ class SupplierService {
       created_by,
     });
 
-    const mailResult = await sendMail(
-      buildSupplierInviteEmail({
-        to: login_email,
-        companyName: company_name || "Supplier",
-        suppCode: supp_code,
-        tempPassword,
-        portalUrl: PORTAL_URL,
-      })
-    );
+    const mailResult = await sendSupplierInviteEmail({
+      to: login_email,
+      companyName: company_name || "Supplier",
+      suppCode: supp_code,
+      tempPassword,
+      portalUrl: PORTAL_URL,
+    });
 
     return { login, emailSent: mailResult.sent };
   }

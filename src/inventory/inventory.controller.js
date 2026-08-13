@@ -25,7 +25,7 @@ class InventoryController {
 
       const data = await InventoryService.createItem({ ...req.body, created_by: user?.ecno });
       await invalidateCache(req.redisClient, "inv:items");
-      broadcast(req.redisClient, "inventory:live", "inventory:updated", { item: data?.[0], action: "created" });
+      broadcast("inventory:live", "inventory:updated", { item: data?.[0], action: "created" });
       res.json({ success: true, data, message: "Inventory item created" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -41,7 +41,7 @@ class InventoryController {
         updated_by: user?.ecno,
       });
       await invalidateCache(req.redisClient, "inv:items");
-      broadcast(req.redisClient, "inventory:live", "inventory:updated", { item: data?.[0], action: "updated" });
+      broadcast("inventory:live", "inventory:updated", { item: data?.[0], action: "updated" });
       res.json({ success: true, data, message: "Inventory item updated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -54,7 +54,7 @@ class InventoryController {
       const { item_sno } = req.params;
       const data = await InventoryService.deleteItem(Number(item_sno), user?.ecno);
       await invalidateCache(req.redisClient, "inv:items");
-      broadcast(req.redisClient, "inventory:live", "inventory:updated", { item: data?.[0], action: "deleted" });
+      broadcast("inventory:live", "inventory:updated", { item: data?.[0], action: "deleted" });
       res.json({ success: true, data, message: "Inventory item discontinued" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -92,7 +92,7 @@ class InventoryController {
         "inv:items",
         `inv:movements:${req.body.item_sno}`
       );
-      broadcast(req.redisClient, "inventory:live", "inventory:updated", { movement: data?.[0], action: "adjusted" });
+      broadcast("inventory:live", "inventory:updated", { movement: data?.[0], action: "adjusted" });
       res.json({ success: true, data, message: "Stock adjusted" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

@@ -49,7 +49,7 @@ class StockRequestController {
         requested_by: user?.ecno,
         requested_name: req.body.requested_name ?? user?.name,
       });
-      broadcast(req.redisClient, "inventory:live", "stockrequest:updated", {
+      broadcast("inventory:live", "stockrequest:updated", {
         request: data?.[0],
         action: "created",
       });
@@ -76,12 +76,12 @@ class StockRequestController {
       const movementKeys = (data.movements ?? []).map((m) => `inv:movements:${m.item_sno}`);
       await invalidateCache(req.redisClient, "inv:items", ...movementKeys);
       for (const movement of data.movements ?? []) {
-        broadcast(req.redisClient, "inventory:live", "inventory:updated", {
+        broadcast("inventory:live", "inventory:updated", {
           movement,
           action: "adjusted",
         });
       }
-      broadcast(req.redisClient, "inventory:live", "stockrequest:updated", {
+      broadcast("inventory:live", "stockrequest:updated", {
         request: data.header,
         action: "issued",
       });
@@ -101,7 +101,7 @@ class StockRequestController {
         req.body?.reason,
         user?.ecno
       );
-      broadcast(req.redisClient, "inventory:live", "stockrequest:updated", {
+      broadcast("inventory:live", "stockrequest:updated", {
         request: data?.[0],
         action: "rejected",
       });
@@ -120,7 +120,7 @@ class StockRequestController {
         req.body?.reason,
         user?.ecno
       );
-      broadcast(req.redisClient, "inventory:live", "stockrequest:updated", {
+      broadcast("inventory:live", "stockrequest:updated", {
         request: data?.[0],
         action: "cancelled",
       });
