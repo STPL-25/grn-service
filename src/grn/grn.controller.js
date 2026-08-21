@@ -83,6 +83,20 @@ class GRNController {
     }
   }
 
+  static async getWarehouseLocationsForGRN(req, res) {
+    try {
+      const { com_sno, div_sno, brn_sno } = req.query;
+      const data = await GRNService.getWarehouseLocationsForGRN({
+        com_sno: com_sno ? Number(com_sno) : null,
+        div_sno: div_sno ? Number(div_sno) : null,
+        brn_sno: brn_sno ? Number(brn_sno) : null,
+      });
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   // ── Draft Operations ──────────────────────────────────────────────────────
 
   static async saveGRNDraft(req, res) {

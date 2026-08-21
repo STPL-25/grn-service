@@ -15,6 +15,9 @@ import GateEntryRouter from "./src/gateentry/gateentry.routes.js";
 import InventoryRouter from "./src/inventory/inventory.routes.js";
 import StockRequestRouter from "./src/stockrequest/stockrequest.routes.js";
 import SupplierRouter from "./src/supplier/supplier.routes.js";
+import ServiceEntryRouter from "./src/serviceentry/serviceentry.routes.js";
+import InvoiceRouter from "./src/invoice/invoice.routes.js";
+import PaymentRouter from "./src/payment/payment.routes.js";
 
 // Mirrors backend-stpl/index.js and gateway/index.js: the env-specific file
 // wins, with plain .env as a fallback for anything it does not define (dotenv
@@ -74,8 +77,8 @@ app.use(express.urlencoded({ extended: true }));
 const health = (_req, res) =>
   res.json({ service: SERVICE_NAME, status: "up", timestamp: new Date().toISOString() });
 
-app.get("/health", health);
-app.get("/grnhealth", health);
+// app.get("/health", health);
+// app.get("/grnhealth", health);
 
 // app.get("/health/ready", async (_req, res) => {
 //   const checks = { mssql: false };
@@ -100,6 +103,9 @@ app.use("/api/grn",  verifyJWT, GRNRouter);
 app.use("/api/gate_entry",   verifyJWT, GateEntryRouter);
 app.use("/api/inventory",   verifyJWT, InventoryRouter);
 app.use("/api/stock_request",   verifyJWT, StockRequestRouter);
+app.use("/api/service_entry",   verifyJWT, ServiceEntryRouter);
+app.use("/api/invoice",   verifyJWT, InvoiceRouter);
+app.use("/api/payment",   verifyJWT, PaymentRouter);
 // Auth is mixed per-route here (staff JWT for /invite, none for /login,
 // supplier JWT for everything else) — see src/supplier/supplier.routes.js
 app.use("/api/supplier",  SupplierRouter);

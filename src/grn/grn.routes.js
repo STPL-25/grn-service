@@ -11,6 +11,7 @@ GRNRouter.get("/getPendingGateEntries",     GRNController.getPendingGateEntries)
 GRNRouter.get("/getGRNsByPO/:po_basic_sno",  GRNController.getGRNsByPO);
 GRNRouter.post("/createGRN",                GRNController.createGRN);
 GRNRouter.get("/getAllGRNs",               GRNController.getAllGRNs);
+GRNRouter.get("/getWarehouseLocations",     GRNController.getWarehouseLocationsForGRN);
 
 // Draft operations (Redis-backed, per-user)
 // GRNRouter.post("/saveGRNDraft",              GRNController.saveGRNDraft);

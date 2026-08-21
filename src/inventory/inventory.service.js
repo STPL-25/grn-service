@@ -50,7 +50,7 @@ class InventoryService {
     const qty = Number(item.received_qty ?? 0) - Number(item.rejected_qty ?? 0);
     if (qty <= 0) return null;
 
-    const location = {
+    const orgScope = {
       com_sno: item.com_sno ?? scope.com_sno,
       div_sno: item.div_sno ?? scope.div_sno,
       brn_sno: item.brn_sno ?? scope.brn_sno,
@@ -61,7 +61,8 @@ class InventoryService {
       item.prod_sno,
       item.prod_name,
       item.unit_name,
-      location
+      orgScope,
+      item.warehouse_location_sno ?? null
     );
     if (!upserted?.item_sno) return null;
 
@@ -72,7 +73,7 @@ class InventoryService {
       reference_no: grn_no,
       reason: "GRN Receipt",
       created_by,
-      ...location,
+      ...orgScope,
     });
     return { item: upserted, movement };
   }

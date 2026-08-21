@@ -63,15 +63,18 @@ class InventoryRepository {
   }
 
   // Stock is bucketed per com/div/brn (dept is not part of the stock key),
-  // so the branch scope travels with the product lookup.
-  async upsertItemByProduct(prod_sno, prod_name, uom_name, location) {
+  // so the branch scope travels with the product lookup. location_sno (a
+  // Warehouse Location master row) is resolved to its code server-side and
+  // written to the item's own `location` (Bin/Rack) field.
+  async upsertItemByProduct(prod_sno, prod_name, uom_name, orgScope, location_sno) {
     return this.executeStoredProcedure("sp_nt_UpsertInventoryItemByProduct", {
       prod_sno,
       prod_name,
       uom_name,
-      com_sno: location.com_sno,
-      div_sno: location.div_sno,
-      brn_sno: location.brn_sno,
+      com_sno: orgScope.com_sno,
+      div_sno: orgScope.div_sno,
+      brn_sno: orgScope.brn_sno,
+      location_sno,
     });
   }
 }

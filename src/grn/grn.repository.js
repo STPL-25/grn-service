@@ -42,6 +42,10 @@ class GRNRepository {
     return this.executeStoredProcedure("sp_nt_GetAllGRNs", filters);
   }
 
+  async getWarehouseLocationsForGRN(scope = {}) {
+    return this.executeStoredProcedure("sp_nt_GetWarehouseLocationsForGRN", scope);
+  }
+
   // ── Draft Operations (Redis) ──────────────────────────────────────────────
   // Key layout matches the monolith (grn:draft:{ecno}:{draftId} +
   // grn:drafts:{ecno} index set) so drafts survive the migration.

@@ -55,6 +55,10 @@ class GRNService {
     return this.repo.getAllGRNs(filters);
   }
 
+  static async getWarehouseLocationsForGRN(scope) {
+    return this.repo.getWarehouseLocationsForGRN(scope);
+  }
+
   static async saveGRNDraft(redisClient, ecno, draftData) {
     return this.repo.saveGRNDraft(redisClient, ecno, draftData);
   }
