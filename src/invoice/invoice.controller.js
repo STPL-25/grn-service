@@ -93,6 +93,31 @@ class InvoiceController {
     }
   }
 
+  static async verifyInvoiceDelivery(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { invoice_sno, remarks } = req.body;
+      if (!invoice_sno) {
+        return res.status(400).json({ success: false, error: "invoice_sno is required" });
+      }
+      const data = await InvoiceService.verifyInvoiceDelivery({ invoice_sno, verified_by: user?.ecno, remarks });
+      await invalidateCache(req.redisClient, "invoice:all");
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getPoItemsForAllocation(req, res) {
+    try {
+      const { po_basic_sno } = req.params;
+      const data = await InvoiceService.getPoItemsForAllocation(Number(po_basic_sno));
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async getAllInvoices(req, res) {
     try {
       const { match_status } = req.query;

@@ -2,6 +2,7 @@ import GateEntryService from "./gateentry.service.js";
 import { invalidateCache, invalidateCacheByPattern } from "../middleware/redisCache.js";
 import { ftpUploader } from "../utils/ftpUpload.js";
 import { broadcast } from "../utils/socketBroadcast.js";
+import { broadcastPrTrack } from "../utils/prTracking.js";
 
 function getAuthUser(req) {
   const user = Array.isArray(req.user) ? req.user[0] : req.user;
@@ -60,6 +61,9 @@ class GateEntryController {
       await invalidateCache(req.redisClient, "gate:all");
       await invalidateCacheByPattern(req.redisClient, "gate:by_po:*");
       broadcast("grn:live", "gate_entry:created", data?.[0]);
+      if (data?.[0]?.po_basic_sno) {
+        broadcastPrTrack(data[0].po_basic_sno, "Gate Entry", data[0].status, data[0]);
+      }
       res.json({ success: true, data, message: "Gate entry created" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -112,6 +116,9 @@ class GateEntryController {
       await invalidateCache(req.redisClient, "gate:all");
       await invalidateCacheByPattern(req.redisClient, "gate:by_po:*");
       broadcast("grn:live", "gate_entry:updated", data?.[0]);
+      if (data?.[0]?.po_basic_sno) {
+        broadcastPrTrack(data[0].po_basic_sno, "Gate Entry", data[0].status, data[0]);
+      }
       res.json({ success: true, data, message: "Gate entry updated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -134,6 +141,9 @@ class GateEntryController {
       await invalidateCache(req.redisClient, "gate:all");
       await invalidateCacheByPattern(req.redisClient, "gate:by_po:*");
       broadcast("grn:live", "gate_entry:status_updated", data?.[0]);
+      if (data?.[0]?.po_basic_sno) {
+        broadcastPrTrack(data[0].po_basic_sno, "Gate Entry", data[0].status, data[0]);
+      }
       res.json({ success: true, data, message: "Gate entry status updated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

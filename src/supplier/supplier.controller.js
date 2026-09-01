@@ -1,5 +1,6 @@
 import SupplierService from "./supplier.service.js";
 import { ftpUploader } from "../utils/ftpUpload.js";
+import { broadcastPrTrack } from "../utils/prTracking.js";
 
 function getAuthEcno(req) {
   const user = Array.isArray(req.user) ? req.user[0] : req.user;
@@ -125,6 +126,12 @@ class SupplierController {
         }
       );
       res.json({ success: true, data, message: "Dispatch slip created" });
+
+      // Additive PR-tracking push — never affects the response above.
+      broadcastPrTrack(Number(po_basic_sno), "Dispatched", "DISPATCHED", {
+        dispatch_mode: body.dispatch_mode,
+        transport_name: body.transport_name,
+      }).catch(() => {});
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
     }
@@ -144,6 +151,26 @@ class SupplierController {
     try {
       const { delivery_sno } = req.params;
       const data = await SupplierService.getDispatchDelivery(req.supplier.kyc_basic_info_sno, Number(delivery_sno));
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(404).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getDebitNotes(req, res) {
+    try {
+      console.log(res.body)
+      const data = await SupplierService.getDebitNotes(req.supplier.kyc_basic_info_sno);
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getDebitNoteDetail(req, res) {
+    try {
+      const { debit_note_sno } = req.params;
+      const data = await SupplierService.getDebitNoteDetail(req.supplier.kyc_basic_info_sno, Number(debit_note_sno));
       res.json({ success: true, data });
     } catch (error) {
       res.status(404).json({ success: false, error: error.message });

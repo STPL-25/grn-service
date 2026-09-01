@@ -23,6 +23,14 @@ class InvoiceService {
     return this.repo.getInvoicesByPO(po_basic_sno);
   }
 
+  static async getPoItemsForAllocation(po_basic_sno) {
+    return this.repo.getPoItemsForAllocation(po_basic_sno);
+  }
+
+  static async verifyInvoiceDelivery(payload) {
+    return this.repo.verifyInvoiceDelivery(payload);
+  }
+
   static async getAllInvoices(filters) {
     return this.repo.getAllInvoices(filters);
   }

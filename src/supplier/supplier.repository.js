@@ -70,6 +70,16 @@ class SupplierRepository {
   async getTransporters() {
     return this.executeStoredProcedure("sp_nt_GetTransportRecords");
   }
+
+  async getDebitNotesForSupplier(kyc_basic_info_sno) {
+    console.log("Fetching debit notes for supplier:", { kyc_basic_info_sno });
+    return this.executeStoredProcedure("sp_nt_GetDebitNotesForSupplier", { kyc_basic_info_sno });
+  }
+
+  async getDebitNoteDetailForSupplier(kyc_basic_info_sno, debit_note_sno) {
+    console.log("Fetching debit note detail for supplier:", { kyc_basic_info_sno, debit_note_sno });
+    return this.executeStoredProcedure("sp_nt_GetDebitNoteDetailForSupplier", { kyc_basic_info_sno, debit_note_sno });
+  }
 }
 
 export default SupplierRepository;

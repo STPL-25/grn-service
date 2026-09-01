@@ -146,6 +146,16 @@ class SupplierService {
     if (!delivery) throw new Error("Delivery not found.");
     return delivery;
   }
+
+  static async getDebitNotes(kyc_basic_info_sno) {
+    return this.repo.getDebitNotesForSupplier(kyc_basic_info_sno);
+  }
+
+  static async getDebitNoteDetail(kyc_basic_info_sno, debit_note_sno) {
+    const [note] = await this.repo.getDebitNoteDetailForSupplier(kyc_basic_info_sno, debit_note_sno);
+    if (!note) throw new Error("Debit note not found.");
+    return note;
+  }
 }
 
 export default SupplierService;

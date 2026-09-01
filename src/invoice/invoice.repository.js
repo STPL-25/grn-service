@@ -36,6 +36,14 @@ class InvoiceRepository {
     return this.executeStoredProcedure("sp_nt_GetInvoicesByPO", { po_basic_sno });
   }
 
+  async getPoItemsForAllocation(po_basic_sno) {
+    return this.executeStoredProcedure("sp_nt_GetPoItemsForInvoiceAllocation", { po_basic_sno });
+  }
+
+  async verifyInvoiceDelivery(payload) {
+    return this.executeStoredProcedure("sp_nt_VerifyInvoiceDelivery", payload);
+  }
+
   async getAllInvoices(filters = {}) {
     return this.executeStoredProcedure("sp_nt_GetAllInvoices", filters);
   }

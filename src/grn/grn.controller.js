@@ -1,6 +1,7 @@
 import GRNService from "./grn.service.js";
 import { invalidateCache, invalidateCacheByPattern } from "../middleware/redisCache.js";
 import { broadcast } from "../utils/socketBroadcast.js";
+import { broadcastPrTrack } from "../utils/prTracking.js";
 
 function getAuthUser(req) {
   const user = Array.isArray(req.user) ? req.user[0] : req.user;
@@ -21,6 +22,18 @@ function broadcastGRNCreated(result) {
       movement: inv.movement,
       action: "grn_receipt",
     });
+  }
+
+  // Additive PR-tracking push — GRN creation covers both the "GRN" stage and,
+  // when it auto-posted inventory, the final "Received Stock" stage.
+  const po_basic_sno = result.grn?.[0]?.po_basic_sno;
+  if (po_basic_sno) {
+    broadcastPrTrack(po_basic_sno, "GRN", result.grn?.[0]?.status, result.grn?.[0]);
+    if (result.inventoryUpdates?.length) {
+      broadcastPrTrack(po_basic_sno, "Received Stock", "RECEIVED", {
+        movements: result.inventoryUpdates.map((i) => i.movement),
+      });
+    }
   }
 }
 

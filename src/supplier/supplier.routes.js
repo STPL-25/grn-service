@@ -24,5 +24,7 @@ SupplierRouter.get("/transporters", verifySupplierAuth, SupplierController.getTr
 SupplierRouter.post("/pos/:po_basic_sno/dispatch", verifySupplierAuth, upload.any(), SupplierController.createDispatch);
 SupplierRouter.get("/dispatch/:dispatch_slip_sno", verifySupplierAuth, SupplierController.getDispatchSlip);
 SupplierRouter.get("/dispatch/delivery/:delivery_sno", verifySupplierAuth, SupplierController.getDispatchDelivery);
+SupplierRouter.get("/debit-notes", verifySupplierAuth, SupplierController.getDebitNotes);
+SupplierRouter.get("/debit-notes/:debit_note_sno", verifySupplierAuth, SupplierController.getDebitNoteDetail);
 
 export default SupplierRouter;
