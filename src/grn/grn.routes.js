@@ -12,6 +12,8 @@ GRNRouter.get("/getGRNsByPO/:po_basic_sno",  GRNController.getGRNsByPO);
 GRNRouter.post("/createGRN",                GRNController.createGRN);
 GRNRouter.get("/getAllGRNs",               GRNController.getAllGRNs);
 GRNRouter.get("/getWarehouseLocations",     GRNController.getWarehouseLocationsForGRN);
+GRNRouter.get("/getUnsyncedInventoryItems", GRNController.getUnsyncedInventoryItems);
+GRNRouter.post("/resyncInventoryItem",      GRNController.resyncInventoryItem);
 
 // Draft operations (Redis-backed, per-user)
 // GRNRouter.post("/saveGRNDraft",              GRNController.saveGRNDraft);

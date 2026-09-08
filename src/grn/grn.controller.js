@@ -96,6 +96,37 @@ class GRNController {
     }
   }
 
+  // ── Inventory sync tracking (see sql/24_grn_inventory_sync_tracking.sql) ──
+
+  static async getUnsyncedInventoryItems(req, res) {
+    try {
+      const data = await GRNService.getUnsyncedInventoryItems();
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async resyncInventoryItem(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { grn_item_sno } = req.body;
+      if (!grn_item_sno) return res.status(400).json({ success: false, error: "grn_item_sno is required" });
+
+      const data = await GRNService.resyncInventoryItem(Number(grn_item_sno), user?.ecno);
+      if (data.result) {
+        broadcast("inventory:live", "inventory:updated", {
+          item: data.result.item,
+          movement: data.result.movement,
+          action: "grn_receipt",
+        });
+      }
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async getWarehouseLocationsForGRN(req, res) {
     try {
       const { com_sno, div_sno, brn_sno } = req.query;

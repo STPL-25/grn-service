@@ -1,6 +1,7 @@
 import StockRequestService from "./stockrequest.service.js";
 import { invalidateCache } from "../middleware/redisCache.js";
 import { broadcast } from "../utils/socketBroadcast.js";
+import { createInAppNotification } from "../utils/notifyClient.js";
 
 function getAuthUser(req) {
   console.log("req.user:", req.user);
@@ -85,6 +86,29 @@ class StockRequestController {
         request: data.header,
         action: "issued",
       });
+
+      // Notify the employee who physically received the goods — the item
+      // list + qty they were just handed, real-time via the existing
+      // in-app bell (persisted, so it's still there if they're offline now).
+      const receiverEcno = data.header?.received_by_ecno;
+      if (receiverEcno && (data.movements ?? []).length > 0) {
+        const itemLines = data.movements
+          .map((m) => `${m.item_name} (${m.quantity} ${m.uom ?? ""})`.trim())
+          .join(", ");
+        createInAppNotification({
+          ecno: receiverEcno,
+          type: "success",
+          title: "Stock issued to you",
+          message: `You received: ${itemLines} — Requisition ${data.header.request_no}.`,
+          data: {
+            request_sno: data.header.request_sno,
+            request_no: data.header.request_no,
+            movements: data.movements.map((m) => ({
+              item_sno: m.item_sno, item_name: m.item_name, quantity: m.quantity, uom: m.uom,
+            })),
+          },
+        }).catch((err) => console.error("[grn-service] failed to notify receiver:", err.message));
+      }
 
       res.json({ success: true, data, message: "Stock issued" });
     } catch (error) {

@@ -28,9 +28,10 @@ class StockRequestService {
   }
 
   static async issueRequest(issueData) {
-    const { request_sno, issued_by, items } = issueData;
+    const { request_sno, issued_by, received_by_ecno, items } = issueData;
     if (!request_sno) throw new Error("request_sno is required");
     if (!issued_by) throw new Error("issued_by is required");
+    if (!received_by_ecno) throw new Error("received_by_ecno is required");
     const toIssue = (Array.isArray(items) ? items : []).filter(
       (l) => l.sr_item_sno && Number(l.issue_qty) > 0
     );
@@ -39,6 +40,7 @@ class StockRequestService {
     const [header, movements] = await this.repo.issueRequest({
       request_sno,
       issued_by,
+      received_by_ecno,
       items: toIssue,
     });
     return { header: header?.[0], movements: movements ?? [] };

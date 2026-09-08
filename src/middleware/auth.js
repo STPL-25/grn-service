@@ -39,11 +39,11 @@ const verifyJWT = (req, res, next) => {
 
 
   // Dev bypass for Postman/API docs — never active in production
-  if (process.env.NODE_ENV !== "production" && DEV_BYPASS_TOKEN && token === DEV_BYPASS_TOKEN) {
-    req.user = { ecno: DEV_BYPASS_ECNO, name: "Dev User", role: "dev" };
-    req.user_ecno = DEV_BYPASS_ECNO;
-    return next();
-  }
+  // if (process.env.NODE_ENV !== "production" && DEV_BYPASS_TOKEN && token === DEV_BYPASS_TOKEN) {
+  //   req.user = { ecno: DEV_BYPASS_ECNO, name: "Dev User", role: "dev" };
+  //   req.user_ecno = DEV_BYPASS_ECNO;
+  //   return next();
+  // }
 
   if (!token) {
     return res.status(401).json({ success: false, message: "Access denied. Please log in." });

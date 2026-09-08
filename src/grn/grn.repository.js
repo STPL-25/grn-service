@@ -46,6 +46,28 @@ class GRNRepository {
     return this.executeStoredProcedure("sp_nt_GetWarehouseLocationsForGRN", scope);
   }
 
+  // ── Inventory sync tracking (see sql/24_grn_inventory_sync_tracking.sql) ──
+
+  async getItemsForInventorySync(grn_basic_sno) {
+    return this.executeStoredProcedure("sp_nt_GetGRNItemsForInventorySync", { grn_basic_sno });
+  }
+
+  async getItemForInventorySync(grn_item_sno) {
+    return this.executeStoredProcedure("sp_nt_GetGRNItemForInventorySync", { grn_item_sno });
+  }
+
+  async getUnsyncedInventoryItems() {
+    return this.executeStoredProcedure("sp_nt_GetUnsyncedGRNInventoryItems", {});
+  }
+
+  async markInventorySync(grn_item_sno, status, error_message = null) {
+    return this.executeStoredProcedure("sp_nt_MarkGRNItemInventorySync", {
+      grn_item_sno,
+      status,
+      error_message,
+    });
+  }
+
   // ── Draft Operations (Redis) ──────────────────────────────────────────────
   // Key layout matches the monolith (grn:draft:{ecno}:{draftId} +
   // grn:drafts:{ecno} index set) so drafts survive the migration.

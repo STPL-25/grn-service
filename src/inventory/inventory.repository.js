@@ -77,6 +77,14 @@ class InventoryRepository {
       location_sno,
     });
   }
+
+  // Non-regular items only: auto-creates a Pending nt_stock_requests row so
+  // the requester never has to raise a manual Store Requisition. No-ops
+  // (empty recordset) for regular items or GRN lines with no PR linkage —
+  // see sp_nt_AutoCreateStockIssueFromGRN for the gating logic.
+  async autoCreateStockIssueFromGRN(data) {
+    return this.executeStoredProcedure("sp_nt_AutoCreateStockIssueFromGRN", data);
+  }
 }
 
 export default InventoryRepository;

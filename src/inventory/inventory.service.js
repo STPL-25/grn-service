@@ -1,4 +1,5 @@
 import InventoryRepository from "./inventory.repository.js";
+import { createInAppNotification } from "../utils/notifyClient.js";
 
 const MOVEMENT_TYPES = ["IN", "OUT", "ADJUSTMENT", "TRANSFER"];
 
@@ -45,7 +46,9 @@ class InventoryService {
   // product. Silently skips items with no prod_sno (e.g. free-text items).
   // `scope` carries the GRN header's com/div/brn/dept so the item and its
   // movement land in the right stock bucket; item-level values win if present.
-  static async receiveFromGRN(item, grn_no, created_by, scope = {}) {
+  // `grn_basic_sno` additionally lets a Non-Regular item auto-generate its
+  // Store Issue record (see autoCreateStockIssueFromGRN below).
+  static async receiveFromGRN(item, grn_no, created_by, scope = {}, grn_basic_sno = null) {
     if (!item?.prod_sno) return null;
     const qty = Number(item.received_qty ?? 0) - Number(item.rejected_qty ?? 0);
     if (qty <= 0) return null;
@@ -75,7 +78,54 @@ class InventoryService {
       created_by,
       ...orgScope,
     });
-    return { item: upserted, movement };
+
+    // sp_nt_AutoCreateStockIssueFromGRN returns zero result sets (recordset
+    // is undefined, not []) whenever the line isn't PR-traceable — the
+    // common case for a direct/Store PO GRN — so this must not
+    // array-destructure the raw result. When it IS PR-traceable it always
+    // returns the requester info (regardless of Regular/Non-Regular), and
+    // additionally creates the auto-issue request (request_sno populated)
+    // only for Non-Regular items.
+    let autoStockRequest = null;
+    if (item.po_item_sno && grn_basic_sno) {
+      try {
+        const rows = await this.repo.autoCreateStockIssueFromGRN({
+          po_item_sno: item.po_item_sno,
+          item_sno: upserted.item_sno,
+          qty,
+          grn_basic_sno,
+          grn_no,
+          created_by,
+        });
+        const origin = rows?.[0];
+        if (origin?.request_sno) autoStockRequest = origin;
+
+        if (origin?.requester_ecno) {
+          const readyMessage = origin.request_sno
+            ? "It's ready for you to collect directly from the store — no requisition needed."
+            : "Raise a Store Requisition to collect it.";
+          createInAppNotification({
+            ecno: origin.requester_ecno,
+            type: origin.request_sno ? "success" : "info",
+            title: "Stock received at store",
+            message: `Your requested item "${origin.item_name}" (qty ${origin.qty} ${origin.uom ?? ""}) `
+              + `for PR ${origin.pr_no} has arrived at the store. ${readyMessage}`,
+            data: {
+              pr_basic_sno: origin.pr_basic_sno,
+              pr_no: origin.pr_no,
+              item_sno: upserted.item_sno,
+              qty: origin.qty,
+              request_sno: origin.request_sno ?? null,
+              request_no: origin.request_no ?? null,
+            },
+          }).catch((err) => console.error("[grn-service] failed to notify PR requester:", err.message));
+        }
+      } catch (err) {
+        console.error("[grn-service] failed to resolve/auto-create non-regular stock issue:", err.message);
+      }
+    }
+
+    return { item: upserted, movement, autoStockRequest };
   }
 }
 
