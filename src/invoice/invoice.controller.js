@@ -136,6 +136,33 @@ class InvoiceController {
       res.status(500).json({ success: false, error: error.message });
     }
   }
+
+  static async getVendorDrivenBillableChildPOs(req, res) {
+    try {
+      const { vendor_sno } = req.query;
+      if (!vendor_sno) return res.status(400).json({ success: false, error: "vendor_sno is required" });
+      const data = await InvoiceService.getVendorDrivenBillableChildPOs(Number(vendor_sno));
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async consolidateVendorDrivenBills(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { vendor_sno, po_basic_snos } = req.body;
+      if (!vendor_sno || !Array.isArray(po_basic_snos) || po_basic_snos.length === 0) {
+        return res.status(400).json({ success: false, error: "vendor_sno and at least one po_basic_sno are required" });
+      }
+      const data = await InvoiceService.consolidateVendorDrivenBills({ vendor_sno, po_basic_snos, created_by: user?.ecno });
+      await invalidateCache(req.redisClient, "invoice:all", "invoice:pending_matches", "payment:payable_bills");
+      broadcast("invoice:live", "invoice:vendor_driven_consolidated", { vendor_sno, count: data.length });
+      res.json({ success: true, data, message: "Vendor-driven bills consolidated" });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
 }
 
 export default InvoiceController;

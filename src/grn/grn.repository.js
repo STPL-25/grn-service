@@ -29,8 +29,8 @@ class GRNRepository {
     return this.executeStoredProcedure("sp_nt_GetPendingGateEntriesForGRN", filters);
   }
 
-  async getGRNsByPO(po_basic_sno) {
-    return this.executeStoredProcedure("sp_nt_GetGRNsByPO", { po_basic_sno });
+  async getGRNsByPO(po_basic_sno, hierarchyJson) {
+    return this.executeStoredProcedure("sp_nt_GetGRNsByPO", { po_basic_sno, hierarchy: hierarchyJson ?? [] });
   }
 
   async createGRN(grnData) {

@@ -1,6 +1,7 @@
 import express from "express";
 import GRNController from "./grn.controller.js";
 import { cacheMiddleware } from "../middleware/redisCache.js";
+import { attachHierarchyScope } from "../middleware/hierarchyScope.js";
 
 const GRNRouter = express.Router();
 
@@ -8,9 +9,9 @@ const GRNRouter = express.Router();
 // GRNRouter.get("/grnhealth123",  GRNController.getGRN);
 GRNRouter.get("/getPendingPOs",             GRNController.getPendingPOs);
 GRNRouter.get("/getPendingGateEntries",     GRNController.getPendingGateEntries);
-GRNRouter.get("/getGRNsByPO/:po_basic_sno",  GRNController.getGRNsByPO);
+GRNRouter.get("/getGRNsByPO/:po_basic_sno", attachHierarchyScope, GRNController.getGRNsByPO);
 GRNRouter.post("/createGRN",                GRNController.createGRN);
-GRNRouter.get("/getAllGRNs",               GRNController.getAllGRNs);
+GRNRouter.get("/getAllGRNs",               attachHierarchyScope, GRNController.getAllGRNs);
 GRNRouter.get("/getWarehouseLocations",     GRNController.getWarehouseLocationsForGRN);
 GRNRouter.get("/getUnsyncedInventoryItems", GRNController.getUnsyncedInventoryItems);
 GRNRouter.post("/resyncInventoryItem",      GRNController.resyncInventoryItem);

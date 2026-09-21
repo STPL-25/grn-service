@@ -2,6 +2,7 @@ import GRNService from "./grn.service.js";
 import { invalidateCache, invalidateCacheByPattern } from "../middleware/redisCache.js";
 import { broadcast } from "../utils/socketBroadcast.js";
 import { broadcastPrTrack } from "../utils/prTracking.js";
+import { orgRoomTargets } from "../middleware/hierarchyScope.js";
 
 function getAuthUser(req) {
   const user = Array.isArray(req.user) ? req.user[0] : req.user;
@@ -10,14 +11,17 @@ function getAuthUser(req) {
 
 // Broadcasts the side-effects of a GRN creation (the GRN itself, the linked
 // gate entry flipping to 'GRN Done', and any auto-posted inventory receipts)
-// to everyone watching the GRN/Inventory pages in real time.
+// to everyone watching the GRN/Inventory pages in real time. grn:created and
+// inventory:updated are org-scoped (orgRoomTargets); gate_entry:status_updated
+// stays on the flat grn:live room for now (not yet converted).
 function broadcastGRNCreated(result) {
-  broadcast("grn:live", "grn:created", result.grn?.[0]);
+  const grn = result.grn?.[0];
+  broadcast(orgRoomTargets("grn", grn), "grn:created", grn);
   if (result.gateEntryUpdate) {
     broadcast("grn:live", "gate_entry:status_updated", result.gateEntryUpdate);
   }
   for (const inv of result.inventoryUpdates ?? []) {
-    broadcast("inventory:live", "inventory:updated", {
+    broadcast(orgRoomTargets("inventory", inv.item ?? inv.movement), "inventory:updated", {
       item: inv.item,
       movement: inv.movement,
       action: "grn_receipt",
@@ -67,7 +71,7 @@ class GRNController {
   static async getGRNsByPO(req, res) {
     try {
       const { po_basic_sno } = req.params;
-      const data = await GRNService.getGRNsByPO(Number(po_basic_sno));
+      const data = await GRNService.getGRNsByPO(Number(po_basic_sno), req.hierarchyJson);
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -89,7 +93,7 @@ class GRNController {
 
   static async getAllGRNs(req, res) {
     try {
-      const data = await GRNService.getAllGRNs(req.query);
+      const data = await GRNService.getAllGRNs({ ...req.query, hierarchy: req.hierarchyJson });
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -115,7 +119,7 @@ class GRNController {
 
       const data = await GRNService.resyncInventoryItem(Number(grn_item_sno), user?.ecno);
       if (data.result) {
-        broadcast("inventory:live", "inventory:updated", {
+        broadcast(orgRoomTargets("inventory", data.result.item ?? data.result.movement), "inventory:updated", {
           item: data.result.item,
           movement: data.result.movement,
           action: "grn_receipt",

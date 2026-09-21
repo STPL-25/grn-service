@@ -1,12 +1,13 @@
 import express from "express";
 import StockRequestController from "./stockrequest.controller.js";
+import { attachHierarchyScope } from "../middleware/hierarchyScope.js";
 
 const StockRequestRouter = express.Router();
 
 // Requests (requester + stock incharge share the list endpoint; the
 // requester's page filters with ?requested_by=<own ecno>, which the
 // controller re-derives from the session rather than trusting as-is)
-StockRequestRouter.get("/getRequests",                    StockRequestController.getRequests);
+StockRequestRouter.get("/getRequests",     attachHierarchyScope, StockRequestController.getRequests);
 StockRequestRouter.get("/getRequestItems/:request_sno",   StockRequestController.getRequestItems);
 StockRequestRouter.post("/createRequest",                 StockRequestController.createRequest);
 

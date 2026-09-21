@@ -10,7 +10,8 @@ function getAuthUser(req) {
 class PaymentController {
   static async getPayableBills(req, res) {
     try {
-      const data = await PaymentService.getPayableBills();
+      const { vendor_sno } = req.query;
+      const data = await PaymentService.getPayableBills(vendor_sno ? { vendor_sno: Number(vendor_sno) } : {});
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

@@ -51,6 +51,10 @@ class InvoiceRepository {
   async getPendingInvoiceMatches() {
     return this.executeStoredProcedure("sp_nt_GetPendingInvoiceMatches");
   }
+
+  async getVendorDrivenBillableChildPOs(vendor_sno) {
+    return this.executeStoredProcedure("sp_nt_GetVendorDrivenBillableChildPOs", { vendor_sno });
+  }
 }
 
 export default InvoiceRepository;

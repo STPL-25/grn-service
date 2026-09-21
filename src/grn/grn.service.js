@@ -14,8 +14,8 @@ class GRNService {
     return this.repo.getPendingGateEntries(filters);
   }
 
-  static async getGRNsByPO(po_basic_sno) {
-    return this.repo.getGRNsByPO(po_basic_sno);
+  static async getGRNsByPO(po_basic_sno, hierarchyJson) {
+    return this.repo.getGRNsByPO(po_basic_sno, hierarchyJson);
   }
 
   // Creates the GRN, then (best-effort, does not fail the GRN if either

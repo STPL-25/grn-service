@@ -16,8 +16,8 @@ class PaymentRepository {
     }
   }
 
-  async getPayableBills() {
-    return this.executeStoredProcedure("sp_nt_GetPayableBills");
+  async getPayableBills(filters = {}) {
+    return this.executeStoredProcedure("sp_nt_GetPayableBills", filters);
   }
 
   async releasePayment(payload) {

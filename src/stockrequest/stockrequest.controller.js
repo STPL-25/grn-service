@@ -2,6 +2,7 @@ import StockRequestService from "./stockrequest.service.js";
 import { invalidateCache } from "../middleware/redisCache.js";
 import { broadcast } from "../utils/socketBroadcast.js";
 import { createInAppNotification } from "../utils/notifyClient.js";
+import { orgRoomTargets } from "../middleware/hierarchyScope.js";
 
 function getAuthUser(req) {
   console.log("req.user:", req.user);
@@ -22,6 +23,7 @@ class StockRequestController {
       if (filters.requested_by !== undefined) {
         filters.requested_by = user?.ecno;
       }
+      filters.hierarchy = req.hierarchyJson;
       const data = await StockRequestService.getRequests(filters);
       res.json({ success: true, data });
     } catch (error) {
@@ -50,12 +52,13 @@ class StockRequestController {
         requested_by: user?.ecno,
         requested_name: req.body.requested_name ?? user?.name,
       });
-      broadcast("inventory:live", "stockrequest:updated", {
+      broadcast(orgRoomTargets("inventory", data?.[0]), "stockrequest:updated", {
         request: data?.[0],
         action: "created",
       });
       res.json({ success: true, data, message: "Stock request submitted" });
     } catch (error) {
+      console.log("Error in createRequest:", error);
       res.status(500).json({ success: false, error: error.message });
     }
   }
@@ -77,12 +80,12 @@ class StockRequestController {
       const movementKeys = (data.movements ?? []).map((m) => `inv:movements:${m.item_sno}`);
       await invalidateCache(req.redisClient, "inv:items", ...movementKeys);
       for (const movement of data.movements ?? []) {
-        broadcast("inventory:live", "inventory:updated", {
+        broadcast(orgRoomTargets("inventory", movement), "inventory:updated", {
           movement,
           action: "adjusted",
         });
       }
-      broadcast("inventory:live", "stockrequest:updated", {
+      broadcast(orgRoomTargets("inventory", data.header), "stockrequest:updated", {
         request: data.header,
         action: "issued",
       });
@@ -125,7 +128,7 @@ class StockRequestController {
         req.body?.reason,
         user?.ecno
       );
-      broadcast("inventory:live", "stockrequest:updated", {
+      broadcast(orgRoomTargets("inventory", data?.[0]), "stockrequest:updated", {
         request: data?.[0],
         action: "rejected",
       });
@@ -144,7 +147,7 @@ class StockRequestController {
         req.body?.reason,
         user?.ecno
       );
-      broadcast("inventory:live", "stockrequest:updated", {
+      broadcast(orgRoomTargets("inventory", data?.[0]), "stockrequest:updated", {
         request: data?.[0],
         action: "cancelled",
       });

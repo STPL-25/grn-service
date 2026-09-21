@@ -13,5 +13,7 @@ InvoiceRouter.get("/getInvoicesByPO/:po_basic_sno", InvoiceController.getInvoice
 InvoiceRouter.get("/getPoItemsForAllocation/:po_basic_sno", InvoiceController.getPoItemsForAllocation);
 InvoiceRouter.get("/getAllInvoices", InvoiceController.getAllInvoices);
 InvoiceRouter.get("/getPendingMatches", InvoiceController.getPendingMatches);
+InvoiceRouter.get("/getVendorDrivenBillableChildPOs", InvoiceController.getVendorDrivenBillableChildPOs);
+InvoiceRouter.post("/consolidateVendorDrivenBills", InvoiceController.consolidateVendorDrivenBills);
 
 export default InvoiceRouter;

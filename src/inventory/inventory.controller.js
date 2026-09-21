@@ -1,6 +1,7 @@
 import InventoryService from "./inventory.service.js";
 import { invalidateCache } from "../middleware/redisCache.js";
 import { broadcast } from "../utils/socketBroadcast.js";
+import { orgRoomTargets } from "../middleware/hierarchyScope.js";
 
 function getAuthUser(req) {
   const user = Array.isArray(req.user) ? req.user[0] : req.user;
@@ -10,7 +11,7 @@ function getAuthUser(req) {
 class InventoryController {
   static async getItems(req, res) {
     try {
-      const data = await InventoryService.getItems(req.query);
+      const data = await InventoryService.getItems({ ...req.query, hierarchy: req.hierarchyJson });
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -25,7 +26,7 @@ class InventoryController {
 
       const data = await InventoryService.createItem({ ...req.body, created_by: user?.ecno });
       await invalidateCache(req.redisClient, "inv:items");
-      broadcast("inventory:live", "inventory:updated", { item: data?.[0], action: "created" });
+      broadcast(orgRoomTargets("inventory", data?.[0]), "inventory:updated", { item: data?.[0], action: "created" });
       res.json({ success: true, data, message: "Inventory item created" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -41,7 +42,7 @@ class InventoryController {
         updated_by: user?.ecno,
       });
       await invalidateCache(req.redisClient, "inv:items");
-      broadcast("inventory:live", "inventory:updated", { item: data?.[0], action: "updated" });
+      broadcast(orgRoomTargets("inventory", data?.[0]), "inventory:updated", { item: data?.[0], action: "updated" });
       res.json({ success: true, data, message: "Inventory item updated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -54,7 +55,7 @@ class InventoryController {
       const { item_sno } = req.params;
       const data = await InventoryService.deleteItem(Number(item_sno), user?.ecno);
       await invalidateCache(req.redisClient, "inv:items");
-      broadcast("inventory:live", "inventory:updated", { item: data?.[0], action: "deleted" });
+      broadcast(orgRoomTargets("inventory", data?.[0]), "inventory:updated", { item: data?.[0], action: "deleted" });
       res.json({ success: true, data, message: "Inventory item discontinued" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -71,9 +72,19 @@ class InventoryController {
     }
   }
 
+  static async getBatches(req, res) {
+    try {
+      const { item_sno } = req.params;
+      const data = await InventoryService.getBatches(Number(item_sno));
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async getStockSummary(req, res) {
     try {
-      const data = await InventoryService.getStockSummary(req.query);
+      const data = await InventoryService.getStockSummary({ ...req.query, hierarchy: req.hierarchyJson });
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -92,7 +103,11 @@ class InventoryController {
         "inv:items",
         `inv:movements:${req.body.item_sno}`
       );
-      broadcast("inventory:live", "inventory:updated", { movement: data?.[0], action: "adjusted" });
+      // FIFO OUT can produce more than one movement row (one per batch drawn) —
+      // broadcast each so its own batch_sno/org context isn't lost.
+      for (const movement of data ?? []) {
+        broadcast(orgRoomTargets("inventory", movement), "inventory:updated", { movement, action: "adjusted" });
+      }
       res.json({ success: true, data, message: "Stock adjusted" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
