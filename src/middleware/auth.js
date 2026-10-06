@@ -22,7 +22,10 @@ function getUserFromPayload(payload) {
 
 function getEcnoFromUser(user) {
   const normalizedUser = Array.isArray(user) ? user[0] : user;
-  return normalizedUser?.ecno ?? null;
+  // Non-staff sessions have no ecno — their login_id is the equivalent identity
+  // (mirrors backend-stpl/src/AuthMiddleware/JwtAuth.js). Without it every
+  // org-scoped GET resolves an empty hierarchy and returns zero rows.
+  return normalizedUser?.ecno ?? normalizedUser?.login_id ?? null;
 }
 
 /**
