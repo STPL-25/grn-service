@@ -5,7 +5,7 @@ import { initializeDatabase } from "../config/db.js";
 const GRN_DRAFT_TTL = 30 * 24 * 60 * 60; // 30 days
 
 class GRNRepository {
-  async executeStoredProcedure(procedureName, parameters = {}) {
+  async executeStoredProcedure(procedureName, parameters = {}, { allRecordsets = false } = {}) {
     try {
       const pool = await initializeDatabase();
       const request = pool.request();
@@ -13,7 +13,7 @@ class GRNRepository {
         request.input("jsonInput", mssql.NVarChar(mssql.MAX), JSON.stringify(parameters));
       }
       const result = await request.execute(procedureName);
-      return result.recordset;
+      return allRecordsets ? result.recordsets : result.recordset;
     } catch (error) {
       throw new Error(`Database error: ${error.message}`);
     }
@@ -36,6 +36,39 @@ class GRNRepository {
   async createGRN(grnData) {
     console.log("Creating GRN with data:", grnData);
     return this.executeStoredProcedure("sp_nt_CreateGRN", grnData);
+  }
+
+  // ── GRN approval gate (see sql/40_grn_approval_workflow.sql) ──
+
+  async submitForApproval(payload) {
+    return this.executeStoredProcedure("sp_nt_SubmitGRNForApproval", payload);
+  }
+
+  async approveGRN(payload) {
+    return this.executeStoredProcedure("sp_nt_ApproveGRN", payload);
+  }
+
+  // First recordset = GRN rows, second = approval history (only when grn_basic_sno given).
+  async getGRNApprovals(filters = {}) {
+    return this.executeStoredProcedure("sp_nt_GetGRNApprovals", filters, { allRecordsets: true });
+  }
+
+  // ── Invoice qty / excess-over-PO approval (see sql/39_grn_invoice_qty_excess_shortage.sql) ──
+
+  async getUomList() {
+    return this.executeStoredProcedure("sp_nt_GetGRNUomList");
+  }
+
+  async getExcessRequests(filters = {}) {
+    return this.executeStoredProcedure("sp_nt_GetGRNExcessRequests", filters);
+  }
+
+  async decideExcess(payload) {
+    return this.executeStoredProcedure("sp_nt_DecideGRNExcess", payload);
+  }
+
+  async getCreditNotesByGRN(grn_basic_sno) {
+    return this.executeStoredProcedure("sp_nt_GetCreditNotesByGRN", { grn_basic_sno });
   }
 
   async getAllGRNs(filters = {}) {

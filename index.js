@@ -16,7 +16,6 @@ import InventoryRouter from "./src/inventory/inventory.routes.js";
 import StockRequestRouter from "./src/stockrequest/stockrequest.routes.js";
 import SupplierRouter from "./src/supplier/supplier.routes.js";
 import InvoiceRouter from "./src/invoice/invoice.routes.js";
-import PaymentRouter from "./src/payment/payment.routes.js";
 import DebitNoteRouter from "./src/debitnote/debitnote.routes.js";
 import AssetRouter from "./src/asset/asset.routes.js";
 
@@ -105,7 +104,7 @@ app.use("/api/gate_entry",   verifyJWT, GateEntryRouter);
 app.use("/api/inventory",   verifyJWT, InventoryRouter);
 app.use("/api/stock_request",   verifyJWT, StockRequestRouter);
 app.use("/api/invoice",   verifyJWT, InvoiceRouter);
-app.use("/api/payment",   verifyJWT, PaymentRouter);
+// /api/payment is owned by the standalone payment-service and routed by the gateway.
 app.use("/api/debit_note",   verifyJWT, DebitNoteRouter);
 app.use("/api/asset_management", verifyJWT, AssetRouter);
 // Auth is mixed per-route here (staff JWT for /invite, none for /login,

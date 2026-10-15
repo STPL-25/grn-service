@@ -127,3 +127,7 @@ Run the scripts in `sql/` in order against the `Non_Trade` DB:
 | `03_gateentry.sql` | `nt_gate_entry` + `sp_nt_CreateGateEntry`, `sp_nt_GetAllGateEntries`, `sp_nt_GetGateEntriesByPO`, `sp_nt_UpdateGateEntryStatus` |
 | `05_grn_basic_info_v2.sql`, `05_grn_item_details.sql`, `06_grn_history_data.sql` | `grn_basic_info`, `grn_item_details`, `grn_history_data` — the tables the GRN procs run against as of 2026-07-20 |
 | `07_grn_procs_v2.sql` | Repoints `sp_nt_CreateGRN`/`sp_nt_GetAllGRNs`/`sp_nt_GetGRNsByPO`/`sp_nt_GetPendingGateEntriesForGRN` at `grn_basic_info`/`grn_item_details`, adds `grn_history_data` audit logging on create. Run after the three scripts above. `nt_grn_basic_info`/`nt_grn_item_details` are no longer written to. |
+
+## Payment service extraction
+
+`/api/payment` is now owned by the standalone `../payment-service`. The gateway routes payment requests there, and grn-service no longer mounts its old payment router. The old payment source and SQL files remain as historical compatibility references; apply new payment-service migrations and restart grn-service when switching ownership. Invoice matching stays in grn-service. See `../payment-service/README.md` for setup and real-time events.

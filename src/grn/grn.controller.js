@@ -91,6 +91,97 @@ class GRNController {
     }
   }
 
+  static async getUomList(req, res) {
+    try {
+      res.json({ success: true, data: await GRNService.getUomList() });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  // ?mine=1 limits to requests where the caller is the approver.
+  static async getExcessRequests(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { mine, status, grn_basic_sno } = req.query;
+      const data = await GRNService.getExcessRequests({
+        status: status || undefined,
+        grn_basic_sno: grn_basic_sno ? Number(grn_basic_sno) : undefined,
+        approver_ecno: mine ? user?.ecno : undefined,
+      });
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async decideExcess(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { excess_sno, action, remarks } = req.body;
+      if (!excess_sno) return res.status(400).json({ success: false, error: "excess_sno is required" });
+      const result = await GRNService.decideExcess({ excess_sno: Number(excess_sno), action, remarks, acted_by: user?.ecno });
+      const inv = result.inventoryUpdate;
+      if (inv) {
+        broadcast(orgRoomTargets("inventory", inv.item ?? inv.movement), "inventory:updated", {
+          item: inv.item, movement: inv.movement, action: "grn_receipt",
+        });
+      }
+      await invalidateCache(req.redisClient, "grn:all");
+      await invalidateCacheByPattern(req.redisClient, "grn:by_po:*");
+      broadcast("grn:live", "grn:excess_decided", result.request);
+      res.json({ success: true, data: result.request, message: `Excess ${result.request.status.toLowerCase()}` });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  }
+
+  // ?mine=1 -> only GRNs waiting on the caller; ?grn_basic_sno=n -> that GRN + its approval history.
+  static async getGRNApprovals(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { mine, grn_basic_sno } = req.query;
+      const data = await GRNService.getGRNApprovals({
+        grn_basic_sno: grn_basic_sno ? Number(grn_basic_sno) : undefined,
+        approver_ecno: mine ? user?.ecno : undefined,
+      });
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async decideGRN(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { grn_basic_sno, action, comments } = req.body;
+      if (!grn_basic_sno) return res.status(400).json({ success: false, error: "grn_basic_sno is required" });
+      const result = await GRNService.approveGRN({
+        grn_basic_sno: Number(grn_basic_sno), action, comments, approved_by: user?.ecno,
+      });
+      for (const inv of result.inventoryUpdates ?? []) {
+        broadcast(orgRoomTargets("inventory", inv.item ?? inv.movement), "inventory:updated", {
+          item: inv.item, movement: inv.movement, action: "grn_receipt",
+        });
+      }
+      await invalidateCache(req.redisClient, "grn:all", "grn:pending_pos");
+      await invalidateCacheByPattern(req.redisClient, "grn:by_po:*");
+      broadcast("grn:live", "grn:approval_decided", result.row);
+      res.json({ success: true, data: result.row, message: `GRN ${result.row.result === "REJECTED" ? "rejected" : "approved"}` });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getCreditNotesByGRN(req, res) {
+    try {
+      const data = await GRNService.getCreditNotesByGRN(Number(req.params.grn_basic_sno));
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
   static async getAllGRNs(req, res) {
     try {
       const data = await GRNService.getAllGRNs({ ...req.query, hierarchy: req.hierarchyJson });
