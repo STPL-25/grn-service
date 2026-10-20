@@ -18,6 +18,8 @@ import SupplierRouter from "./src/supplier/supplier.routes.js";
 import InvoiceRouter from "./src/invoice/invoice.routes.js";
 import DebitNoteRouter from "./src/debitnote/debitnote.routes.js";
 import AssetRouter from "./src/asset/asset.routes.js";
+import Gstr2bRouter from "./src/gstr2b/gstr2b.routes.js";
+import PaymentNetRouter from "./src/paymentnet/paymentnet.routes.js";
 
 // Mirrors backend-stpl/index.js and gateway/index.js: the env-specific file
 // wins, with plain .env as a fallback for anything it does not define (dotenv
@@ -107,6 +109,8 @@ app.use("/api/invoice",   verifyJWT, InvoiceRouter);
 // /api/payment is owned by the standalone payment-service and routed by the gateway.
 app.use("/api/debit_note",   verifyJWT, DebitNoteRouter);
 app.use("/api/asset_management", verifyJWT, AssetRouter);
+app.use("/api/gstr2b", verifyJWT, Gstr2bRouter);
+app.use("/api/payment_net", verifyJWT, PaymentNetRouter);
 // Auth is mixed per-route here (staff JWT for /invite, none for /login,
 // supplier JWT for everything else) — see src/supplier/supplier.routes.js
 app.use("/api/supplier",  SupplierRouter);

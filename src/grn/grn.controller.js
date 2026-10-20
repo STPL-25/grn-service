@@ -1,6 +1,7 @@
 import GRNService from "./grn.service.js";
 import { invalidateCache, invalidateCacheByPattern } from "../middleware/redisCache.js";
 import { broadcast } from "../utils/socketBroadcast.js";
+import { ftpUploader } from "../utils/ftpUpload.js";
 import { broadcastPrTrack } from "../utils/prTracking.js";
 import { orgRoomTargets } from "../middleware/hierarchyScope.js";
 
@@ -81,7 +82,21 @@ class GRNController {
   static async createGRN(req, res) {
     try {
       const user = getAuthUser(req);
-      const result = await GRNService.createGRN({ ...req.body, created_by: user?.ecno });
+      const body = { ...req.body };
+      // multipart sends nested values as strings
+      if (typeof body.items === "string") {
+        try { body.items = JSON.parse(body.items); } catch { return res.status(400).json({ success: false, error: "Invalid items" }); }
+      }
+      if (!String(body.doc_ref_no ?? "").trim() || !body.invoice_date || !(Number(body.invoice_amount) > 0)) {
+        return res.status(400).json({ success: false, error: "Invoice number, invoice date and invoice amount are required" });
+      }
+      const invoiceFile = Array.isArray(req.files)
+        ? req.files.find((f) => f.fieldname === "invoice_document") || req.files[0]
+        : undefined;
+      if (!invoiceFile) return res.status(400).json({ success: false, error: "The supplier invoice document is required" });
+      const invoice_doc_url = await ftpUploader.uploadFileIfExists(invoiceFile, "NON_TRADE_DATAS/GRN_INVOICES");
+      if (!invoice_doc_url) return res.status(502).json({ success: false, error: "Invoice upload failed, please retry" });
+      const result = await GRNService.createGRN({ ...body, invoice_doc_url, created_by: user?.ecno });
       await invalidateCache(req.redisClient, "grn:pending_pos", "grn:all", "grn:pending_gate_entries");
       await invalidateCacheByPattern(req.redisClient, "grn:by_po:*");
       broadcastGRNCreated(result);
@@ -151,6 +166,36 @@ class GRNController {
     }
   }
 
+  static async getGRNsForAssetTags(req, res) {
+    try {
+      res.json({ success: true, data: await GRNService.getGRNsForAssetTags() });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async generateAssetTags(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { grn_basic_sno } = req.body;
+      if (!grn_basic_sno) return res.status(400).json({ success: false, error: "grn_basic_sno is required" });
+      const data = await GRNService.generateAssetTags({ grn_basic_sno: Number(grn_basic_sno), created_by: user?.ecno });
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  }
+
+  static async claimAssetTagsForPrint(req, res) {
+    try {
+      const { tag_codes } = req.body;
+      if (!Array.isArray(tag_codes) || tag_codes.length === 0) return res.status(400).json({ success: false, error: "tag_codes is required" });
+      res.json({ success: true, data: { claimed: await GRNService.claimAssetTagsForPrint(tag_codes) } });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  }
+
   static async decideGRN(req, res) {
     try {
       const user = getAuthUser(req);
@@ -168,6 +213,50 @@ class GRNController {
       await invalidateCacheByPattern(req.redisClient, "grn:by_po:*");
       broadcast("grn:live", "grn:approval_decided", result.row);
       res.json({ success: true, data: result.row, message: `GRN ${result.row.result === "REJECTED" ? "rejected" : "approved"}` });
+    } catch (error) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getJournals(req, res) {
+    try {
+      const { source_type, source_sno, suspense_only } = req.query;
+      const data = await GRNService.getJournals({
+        source_type: source_type || undefined,
+        source_sno: source_sno ? Number(source_sno) : undefined,
+        suspense_only: suspense_only ? 1 : undefined,
+      });
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getAccountHeads(req, res) {
+    try {
+      res.json({ success: true, data: await GRNService.getAccountHeads() });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getSubcategoryAccountMap(req, res) {
+    try {
+      res.json({ success: true, data: await GRNService.getSubcategoryAccountMap() });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async setSubcategoryAccountHead(req, res) {
+    try {
+      const user = getAuthUser(req);
+      const { subcat_sno, head_sno } = req.body;
+      if (!subcat_sno) return res.status(400).json({ success: false, error: "subcat_sno is required" });
+      const data = await GRNService.setSubcategoryAccountHead({
+        subcat_sno: Number(subcat_sno), head_sno: head_sno ? Number(head_sno) : null, modified_by: user?.ecno,
+      });
+      res.json({ success: true, data });
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
     }

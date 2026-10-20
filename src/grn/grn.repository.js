@@ -53,6 +53,46 @@ class GRNRepository {
     return this.executeStoredProcedure("sp_nt_GetGRNApprovals", filters, { allRecordsets: true });
   }
 
+  // ── Asset tags (see sql/58_grn_asset_tags.sql) ──
+
+  async getGRNsForAssetTags() {
+    return this.executeStoredProcedure("sp_nt_GetGRNsForAssetTags", {});
+  }
+
+  async generateAssetTags(payload) {
+    return this.executeStoredProcedure("sp_nt_GenerateGRNAssetTags", payload);
+  }
+
+  async getAssetTags(grn_basic_sno) {
+    return this.executeStoredProcedure("sp_nt_GetGRNAssetTags", { grn_basic_sno });
+  }
+
+  async markAssetTagsPrinted(tag_codes) {
+    return this.executeStoredProcedure("sp_nt_ClaimAssetTagsForPrint", { tag_codes });
+  }
+
+  // ── Accounting journal (see sql/41_accounting_journal.sql) ──
+
+  async postGRNJournal(payload) {
+    return this.executeStoredProcedure("sp_nt_PostGRNJournal", payload);
+  }
+
+  async getJournals(filters = {}) {
+    return this.executeStoredProcedure("sp_nt_GetJournals", filters);
+  }
+
+  async getAccountHeads() {
+    return this.executeStoredProcedure("sp_nt_GetAccountHeads", {});
+  }
+
+  async getSubcategoryAccountMap() {
+    return this.executeStoredProcedure("sp_nt_GetSubcategoryAccountMap", {});
+  }
+
+  async setSubcategoryAccountHead(payload) {
+    return this.executeStoredProcedure("sp_nt_SetSubcategoryAccountHead", payload);
+  }
+
   // ── Invoice qty / excess-over-PO approval (see sql/39_grn_invoice_qty_excess_shortage.sql) ──
 
   async getUomList() {

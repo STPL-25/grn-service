@@ -77,7 +77,50 @@ class GRNService {
   static async postApprovedGRN(grn_basic_sno, actor) {
     const persistedItems = await this.repo.getItemsForInventorySync(grn_basic_sno);
     const outcomes = await this.postInventoryForItems(persistedItems, actor);
+    await this.postJournalSafe(grn_basic_sno, actor);
     return outcomes.filter((o) => o.status === "Synced").map((o) => o.result);
+  }
+
+  // Accounting journal (Dr stock/expense/suspense, Cr GRNI). Best-effort like the inventory post: a
+  // failure is logged and can be re-run, because sp_nt_PostGRNJournal only journals what is not yet journalled.
+  static async postJournalSafe(grn_basic_sno, actor) {
+    try {
+      const [row] = await this.repo.postGRNJournal({ grn_basic_sno, created_by: actor });
+      return row ?? null;
+    } catch (err) {
+      console.error("[grn-service] failed to post GRN journal:", err.message);
+      return null;
+    }
+  }
+
+  static async getJournals(filters) {
+    return this.repo.getJournals(filters);
+  }
+
+  static async getAccountHeads() {
+    return this.repo.getAccountHeads();
+  }
+
+  static async getSubcategoryAccountMap() {
+    return this.repo.getSubcategoryAccountMap();
+  }
+
+  static async setSubcategoryAccountHead(payload) {
+    const [row] = await this.repo.setSubcategoryAccountHead(payload);
+    return row;
+  }
+
+  static async getGRNsForAssetTags() {
+    return this.repo.getGRNsForAssetTags();
+  }
+
+  // Creates the missing per-unit tags of an approved GRN and returns all of them.
+  static async generateAssetTags({ grn_basic_sno, created_by }) {
+    return this.repo.generateAssetTags({ grn_basic_sno, created_by });
+  }
+
+  static async claimAssetTagsForPrint(tag_codes) {
+    return (await this.repo.markAssetTagsPrinted(tag_codes)).map((r) => r.tag_code);
   }
 
   static async getGRNApprovals(filters) {
@@ -146,6 +189,7 @@ class GRNService {
         } catch (err) {
           console.error("[grn-service] failed to post accepted excess to inventory:", err.message);
         }
+        await this.postJournalSafe(row.grn_basic_sno, acted_by);
       }
     }
 
