@@ -33,6 +33,12 @@ PaymentNetRouter.get("/bills", wrap((req) => exec("sp_nt_GetPayableBillsNet", { 
 // Goods received (GRN approved) but no supplier invoice yet - listed on the Payment page as "pending payment" (sql/53).
 PaymentNetRouter.get("/grn-pending", wrap((req) => exec("sp_nt_GetGrnPendingPayments", { vendor_sno: req.query.vendor_sno ? Number(req.query.vendor_sno) : undefined, include_billed: req.query.include_billed === "1" }), 500));
 
+// Invoice-wise ledger per PO: every invoice (paid / part paid / unpaid / not allocated, with duplicate flag) and the invoice data each GRN captured (sql/63).
+PaymentNetRouter.get("/invoice-ledger", wrap(async (req) => {
+  const [invoices = [], grns = []] = await exec("sp_nt_GetPoInvoiceLedger", { vendor_sno: req.query.vendor_sno ? Number(req.query.vendor_sno) : undefined }, true);
+  return { invoices, grns };
+}, 500));
+
 PaymentNetRouter.get("/adjustments", wrap(async (req) => {
   const [advances = [], debitNotes = [], creditNotes = []] =
     await exec("sp_nt_GetPaymentAdjustments", { vendor_sno: Number(req.query.vendor_sno) }, true);
