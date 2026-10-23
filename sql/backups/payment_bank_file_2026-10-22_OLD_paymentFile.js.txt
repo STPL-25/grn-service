@@ -1,0 +1,85 @@
+// BACKUP of grn-service/src/paymentnet/paymentFile.js as it was before the bank upload file (sql/68) - the generic CSV builder of sql/65.
+// To go back to it: copy this text over src/paymentnet/paymentFile.js (and run the sql/backups/payment_bank_file_2026-10-22_ROLLBACK.sql).
+// Kept as .txt so nodemon does not pick it up.
+
+// paymentFile.js - the payment file of a Payment Run (sql/65): one CSV line per bank transfer.
+//
+// Only lines that really are a transfer to the supplier's bank account go in (channel BANK: NEFT / RTGS / UPI ... with an
+// account on file). Cheque / cash / DD payments (MANUAL), suppliers paid on their portal (PORTAL) and payments the advances
+// and notes settle entirely (ADJUSTMENT, nothing to pay out) stay out - a bank upload with those lines would be rejected - and
+// are returned in `skipped` so the screen can list them.
+//
+// The layout below is a generic bulk-payment layout, not any one bank's. When the bank is fixed, change COLUMNS (and, if the
+// bank wants a fixed-width / pipe-separated file, `toText`) - nothing else reads the layout. Today the browser saves the file
+// to its Downloads folder; once a folder is arranged, the same `content` can be written there from the proceed route.
+
+const isoDate = (d) => {
+  if (!d) return "";
+  const s = d instanceof Date ? d.toISOString() : String(d);
+  return s.slice(0, 10);
+};
+const ddmmyyyy = (d) => {
+  const s = isoDate(d);
+  return s ? `${s.slice(8, 10)}/${s.slice(5, 7)}/${s.slice(0, 4)}` : "";
+};
+const money = (n) => Number(n ?? 0).toFixed(2);
+
+// A cell that starts with = + - @ is read as a formula by a spreadsheet; keep free text from becoming one.
+const safeText = (v) => {
+  const s = String(v ?? "").replace(/[\r\n]+/g, " ").trim();
+  return /^[=+\-@\t]/.test(s) ? `'${s}` : s;
+};
+const csvCell = (v) => {
+  const s = String(v ?? "");
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+export const COLUMNS = [
+  { header: "Sl No",                  value: (_i, n) => n },
+  { header: "Payment Ref",            value: (i) => i.payment_no },
+  { header: "Payment Mode",           value: (i) => String(i.mode ?? "").toUpperCase() },
+  { header: "Payment Date",           value: (_i, _n, b) => ddmmyyyy(b.batch_date) },
+  { header: "Debit Account",          value: (i) => i.debit_account ?? "" },
+  { header: "Beneficiary Name",       value: (i) => safeText(i.beneficiary_name) },
+  { header: "Beneficiary Account No", value: (i) => String(i.account_no ?? "").trim() },
+  { header: "IFSC",                   value: (i) => String(i.ifsc ?? "").trim().toUpperCase() },
+  { header: "Bank Name",              value: (i) => safeText(i.bank_name) },
+  { header: "Branch",                 value: (i) => safeText(i.branch_name) },
+  { header: "Amount",                 value: (i) => money(i.amount) },
+  { header: "Narration",              value: (i) => safeText(i.narration).slice(0, 35) },
+  { header: "Supplier Code",          value: (i) => safeText(i.supp_code) },
+  { header: "Supplier Name",          value: (i) => safeText(i.vendor_name) },
+  { header: "Supplier Email",         value: (i) => safeText(i.vendor_email) },
+  { header: "Invoice No(s)",          value: (i) => safeText(i.invoice_nos) },
+  { header: "Supplier Invoice No(s)", value: (i) => safeText(i.supplier_invoice_nos) },
+  { header: "MSME",                   value: (i) => safeText(i.msme_label) },
+];
+
+const SKIP_REASON = {
+  MANUAL: "Cheque / cash / DD - not a bank transfer",
+  PORTAL: "Supplier is paid on their portal",
+  ADJUSTMENT: "Nothing to pay out - advances / notes settle it",
+};
+
+const toText = (rows) => rows.map((r) => r.map(csvCell).join(",")).join("\r\n") + "\r\n";
+
+/**
+ * @param batch  { batch_no, batch_date }
+ * @param items  payment_batch_item rows in file order ({ channel, payment_no, mode, amount, beneficiary_name, account_no, ifsc, ... })
+ * @returns { fileName, mimeType, content, lineCount, totalAmount, skipped: [{ payment_no, vendor_name, amount, channel, reason }] }
+ */
+export function buildPaymentFile(batch, items) {
+  const bank = items.filter((i) => i.channel === "BANK");
+  const skipped = items
+    .filter((i) => i.channel !== "BANK")
+    .map((i) => ({ payment_no: i.payment_no, vendor_name: i.vendor_name, amount: Number(i.amount), channel: i.channel, reason: SKIP_REASON[i.channel] ?? "Not a bank transfer" }));
+  const rows = [COLUMNS.map((c) => c.header), ...bank.map((item, idx) => COLUMNS.map((c) => c.value(item, idx + 1, batch)))];
+  return {
+    fileName: `PaymentFile_${batch.batch_no}_${isoDate(batch.batch_date)}.csv`,
+    mimeType: "text/csv;charset=utf-8",
+    content: toText(rows),
+    lineCount: bank.length,
+    totalAmount: Math.round(bank.reduce((s, i) => s + Number(i.amount), 0) * 100) / 100,
+    skipped,
+  };
+}

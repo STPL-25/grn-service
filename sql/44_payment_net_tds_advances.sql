@@ -15,7 +15,9 @@
 --   * Notes: unadjusted debit/credit notes of the same supplier; each can be set off once.
 --   sp_nt_ReleasePaymentNet with preview=true returns the numbers without saving. The old sp_nt_ReleasePayment is untouched.
 -- Rates below are starting values for the TDS master - confirm with your tax consultant; they are editable.
--- Re-runnable.
+-- Re-runnable. NOTE: sp_nt_GetPaymentAdjustments and sp_nt_ReleasePaymentNet below are superseded by sql/64 (notes are
+-- offered per bill, releases are serialised per supplier) - on a database that already has sql/64, do not re-run those two
+-- batches from this file.
 -- ============================================================
 
 -- columns the payment hold reads (also created by sql/43 + sql/45; idempotent)
