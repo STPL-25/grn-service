@@ -15,5 +15,6 @@ InvoiceRouter.get("/getAllInvoices", InvoiceController.getAllInvoices);
 InvoiceRouter.get("/getPendingMatches", InvoiceController.getPendingMatches);
 InvoiceRouter.get("/getVendorDrivenBillableChildPOs", InvoiceController.getVendorDrivenBillableChildPOs);
 InvoiceRouter.post("/consolidateVendorDrivenBills", InvoiceController.consolidateVendorDrivenBills);
+InvoiceRouter.get("/getVendorBillConsolidations", InvoiceController.getVendorBillConsolidations);
 
 export default InvoiceRouter;

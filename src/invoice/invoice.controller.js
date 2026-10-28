@@ -141,7 +141,18 @@ class InvoiceController {
     try {
       const { vendor_sno } = req.query;
       if (!vendor_sno) return res.status(400).json({ success: false, error: "vendor_sno is required" });
-      const data = await InvoiceService.getVendorDrivenBillableChildPOs(Number(vendor_sno));
+      const { from_date, to_date } = req.query;
+      const data = await InvoiceService.getVendorDrivenBillableChildPOs(Number(vendor_sno), from_date, to_date);
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getVendorBillConsolidations(req, res) {
+    try {
+      const vendor_sno = req.query.vendor_sno ? Number(req.query.vendor_sno) : undefined;
+      const data = await InvoiceService.getVendorBillConsolidations(vendor_sno);
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -151,14 +162,16 @@ class InvoiceController {
   static async consolidateVendorDrivenBills(req, res) {
     try {
       const user = getAuthUser(req);
-      const { vendor_sno, po_basic_snos } = req.body;
+      const { vendor_sno, po_basic_snos, period_from, period_to } = req.body;
       if (!vendor_sno || !Array.isArray(po_basic_snos) || po_basic_snos.length === 0) {
         return res.status(400).json({ success: false, error: "vendor_sno and at least one po_basic_sno are required" });
       }
-      const data = await InvoiceService.consolidateVendorDrivenBills({ vendor_sno, po_basic_snos, created_by: user?.ecno });
+      const { results, consolidation } = await InvoiceService.consolidateVendorDrivenBills({
+        vendor_sno, po_basic_snos, period_from, period_to, created_by: user?.ecno,
+      });
       await invalidateCache(req.redisClient, "invoice:all", "invoice:pending_matches", "payment:payable_bills");
-      broadcast("invoice:live", "invoice:vendor_driven_consolidated", { vendor_sno, count: data.length });
-      res.json({ success: true, data, message: "Vendor-driven bills consolidated" });
+      broadcast("invoice:live", "invoice:vendor_driven_consolidated", { vendor_sno, count: results.length });
+      res.json({ success: true, data: results, consolidation, message: "Vendor-driven bills consolidated" });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }

@@ -25,6 +25,11 @@ SupplierRouter.post("/pos/:po_basic_sno/dispatch", verifySupplierAuth, upload.an
 SupplierRouter.get("/dispatch/:dispatch_slip_sno", verifySupplierAuth, SupplierController.getDispatchSlip);
 SupplierRouter.get("/dispatch/delivery/:delivery_sno", verifySupplierAuth, SupplierController.getDispatchDelivery);
 SupplierRouter.get("/debit-notes", verifySupplierAuth, SupplierController.getDebitNotes);
+// The supplier's own payments (advance + bill payments, scheduled / paid) and the advances held for them (sql/69)
+SupplierRouter.get("/payments", verifySupplierAuth, SupplierController.getPayments);
 SupplierRouter.get("/debit-notes/:debit_note_sno", verifySupplierAuth, SupplierController.getDebitNoteDetail);
+// Credit notes (sql/71) - shown next to the debit notes on the portal
+SupplierRouter.get("/credit-notes", verifySupplierAuth, SupplierController.getCreditNotes);
+SupplierRouter.get("/credit-notes/:credit_note_sno", verifySupplierAuth, SupplierController.getCreditNoteDetail);
 
 export default SupplierRouter;

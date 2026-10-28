@@ -4,7 +4,7 @@ import { initializeDatabase } from "../config/db.js";
 import { broadcast } from "../utils/socketBroadcast.js";
 import { createInAppNotification } from "../utils/notifyClient.js";
 import { attachHierarchyScope, orgRoomTargets } from "../middleware/hierarchyScope.js";
-import { buildPaymentFile } from "./paymentFile.js";
+import { buildPaymentFile, buildVerificationSheet } from "./paymentFile.js";
 
 // Payment backend: payable bills with GRN / 2B / TDS context, the adjustments available for the bills being paid
 // (advances, debit/credit notes, TDS sections), and the payment life cycle (sql/44, sql/48, sql/64, sql/65):
@@ -13,7 +13,7 @@ import { buildPaymentFile } from "./paymentFile.js";
 //                                                            -> 'Approved' | 'Rejected' | stays 'Pending Approval' with the next approver
 //   POST /cancel   withdraws a payment that is not paid yet   -> 'Cancelled'
 //   GET  /entries  the approval screen and the Payment Run list (approved payments waiting for money, MSME / due dates)
-//   GET  /run/senders  the company's bank accounts a run can be paid from (Payment Bank master, sql/138)
+//   GET  /run/senders  the company/division/branch bank accounts a run can be paid from (Payment Bank master, sql/138)
 //   POST /run/proceed  pays the ticked payments against today's fund plan from one of them: batch, journals, and the bank payment file (sql/68)
 // sp_nt_ReleasePaymentNet with preview=true returns the figures without saving.
 const PaymentNetRouter = express.Router();
@@ -64,10 +64,11 @@ PaymentNetRouter.get("/invoice-ledger", wrap(async (req) => {
 // a bill still open is offered only with that bill. Without invoice_snos no note comes back.
 PaymentNetRouter.get("/adjustments", wrap(async (req) => {
   const invoice_snos = [...new Set(String(req.query.invoice_snos ?? "").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0))];
-  const [advances = [], debitNotes = [], creditNotes = []] =
+  // 5th recordset (sql/69): advances approved for the supplier but still waiting in Payment Run - not nettable until they are paid
+  const [advances = [], debitNotes = [], creditNotes = [], , pendingAdvances = []] =
     await exec("sp_nt_GetPaymentAdjustments", { vendor_sno: Number(req.query.vendor_sno), invoice_snos }, true);
   const tdsSections = await exec("sp_nt_GetTdsSections", {});   // carries applies_to (Service / Product / Both), sql/62
-  return { advances, debitNotes, creditNotes, tdsSections };
+  return { advances, debitNotes, creditNotes, tdsSections, pendingAdvances };
 }));
 
 // TDS Section master (Masters screen): list every section, add / edit one (sql/60)
@@ -146,8 +147,11 @@ PaymentNetRouter.get("/entries/:id", attachHierarchyScope, wrap(async (req) => {
   if (!entries[0]) throw httpError(404, "Payment not found, or it is outside your access");
   const [history = [], adjustments = [], stages = [], summary = [], forwardTargets = [], sendBackTargets = [], log = [], fields = []] =
     await exec("sp_nt_GetPaymentActivity", { payment_sno: id, ecno }, true);
+  // per invoice: what it may be paid in all, what other payments hold, what this one pays, what is left, GST waiting for 2B (sql/70) -
+  // what an approver needs to decide whether to pay less now. A database without sql/70 simply has no such figures.
+  const invoices = await exec("sp_nt_GetPaymentInvoiceFigures", { payment_sno: id }).catch(() => []);
   return {
-    entry: entries[0], lines, history, adjustments, stages,
+    entry: entries[0], lines, invoices, history, adjustments, stages,
     approval: { summary: summary[0] ?? null, forward_targets: forwardTargets, send_back_targets: sendBackTargets, log, condition_fields: fields },
   };
 }, 500));
@@ -180,6 +184,27 @@ PaymentNetRouter.post("/approve", wrap(async (req) => {
   return row;
 }));
 
+// The approver pays less now (sql/70): { payment_sno, reason, allocations: [{ invoice_sno, amount }] } - each invoice is cut down to `amount`
+// (0 leaves it out of this payment; never more than was saved). What is not paid stays on the invoice for another payment.
+// Only the approver the payment is with can do it; it stays Pending Approval, at the same stage, and the approver then approves it as usual.
+PaymentNetRouter.post("/revise", wrap(async (req) => {
+  const { payment_sno, reason, allocations } = req.body ?? {};
+  if (!positiveInt(payment_sno)) throw httpError(400, "payment_sno is required");
+  if (!String(reason ?? "").trim()) throw httpError(400, "Give the reason for paying less now");
+  if (!Array.isArray(allocations) || allocations.length === 0
+    || !allocations.every((a) => positiveInt(a?.invoice_sno) && Number.isFinite(Number(a?.amount)) && Number(a.amount) >= 0)) {
+    throw httpError(400, "Give the amount to pay now for each invoice");
+  }
+  const by = callerOf(req);
+  const [row] = await exec("sp_nt_RevisePayment", {
+    payment_sno: Number(payment_sno), revised_by: by, reason: String(reason).trim(),
+    allocations: allocations.map((a) => ({ invoice_sno: Number(a.invoice_sno), amount: Number(a.amount) })),
+  });
+  broadcastPaymentUpdated(row);
+  notify(row.created_by ?? null, "info", "Payment reduced", `${row.payment_no} was reduced to ${rupees(row.net_paid)} by ${by}: ${String(reason).trim()}. The rest of the invoice stays open.`, { payment_sno: row.payment_sno });
+  return row;
+}));
+
 PaymentNetRouter.post("/cancel", wrap(async (req) => {
   const { payment_sno, reason } = req.body ?? {};
   if (!positiveInt(payment_sno)) throw httpError(400, "payment_sno is required");
@@ -193,9 +218,14 @@ PaymentNetRouter.post("/cancel", wrap(async (req) => {
 }));
 
 // ── payment run (sql/65, sql/68) ────────────────────────────────────────────
-// The bank accounts a run of one company can be paid from - the Payment Bank master (backend-stpl sql/138). Only the last 4 digits go out.
+// The bank accounts for the run's company/division/branch - the Payment Bank master (backend-stpl sql/138). Only the last 4 digits go out.
 PaymentNetRouter.get("/run/senders", attachHierarchyScope, wrap(
-  (req) => exec("sp_nt_GetPaymentSenders", { com_sno: positiveInt(req.query.com_sno) ?? undefined, hierarchy: req.hierarchyJson }), 500));
+  (req) => exec("sp_nt_GetPaymentSenders", {
+    com_sno: positiveInt(req.query.com_sno) ?? undefined,
+    div_sno: positiveInt(req.query.div_sno) ?? undefined,
+    brn_sno: positiveInt(req.query.brn_sno) ?? undefined,
+    hierarchy: req.hierarchyJson,
+  }), 500));
 
 // The bank file needs sql/68 (sender columns + procedures). Refuse BEFORE any payment is paid when this code runs against a database
 // that does not have it yet - otherwise the run would be paid and its file could not be written. Remembered once true.
@@ -203,10 +233,30 @@ let bankFileSchemaReady = false;
 async function requireBankFileSchema() {
   if (bankFileSchemaReady) return;
   const pool = await initializeDatabase();
-  const r = await pool.request().query("SELECT COL_LENGTH('dbo.payment_batch', 'file_type') AS c, OBJECT_ID('dbo.sp_nt_GetPaymentSenders') AS p");
-  if (r.recordset[0]?.c == null || r.recordset[0]?.p == null) throw httpError(503, "The payment bank file is not set up in the database yet - run grn-service sql/68 (after backend-stpl sql/138), then try again.");
+  const r = await pool.request().query("SELECT COL_LENGTH('dbo.payment_batch', 'file_no') AS c, OBJECT_ID('dbo.sp_nt_GetPaymentSenders') AS p, OBJECT_ID('dbo.payment_file_creation_no') AS n");
+  if (r.recordset[0]?.c == null || r.recordset[0]?.p == null || r.recordset[0]?.n == null) throw httpError(503, "The scoped payment bank file sequence is not set up yet - run the latest grn-service sql/68 (after backend-stpl sql/138), then try again.");
   bankFileSchemaReady = true;
 }
+
+// ── suppliers paid on their portal (sql/69) ─────────────────────────────────
+// No run, no file: the payment is paid on the portal and the transaction is recorded here afterwards.
+PaymentNetRouter.post("/run/portal-payment", attachHierarchyScope, wrap(async (req) => {
+  const b = req.body ?? {};
+  if (!positiveInt(b.payment_sno)) throw httpError(400, "payment_sno is required");
+  const [row] = await exec("sp_nt_RecordPortalPayment", {
+    payment_sno: Number(b.payment_sno), txn_mode: b.txn_mode, txn_id: b.txn_id,
+    txn_date: /^\d{4}-\d{2}-\d{2}$/.test(String(b.txn_date ?? "")) ? b.txn_date : undefined,
+    amount_paid: b.amount_paid, discount_amount: b.discount_amount === "" ? undefined : b.discount_amount, remarks: b.remarks,
+    recorded_by: callerOf(req), hierarchy: req.hierarchyJson,
+  });
+  const { com_sno, div_sno, brn_sno, dept_sno } = row;
+  broadcastPaymentUpdated({ payment_sno: row.payment_sno, payment_no: row.payment_no, status: "Processed", com_sno, div_sno, brn_sno, dept_sno }, { portal: true });
+  return row;
+}));
+PaymentNetRouter.get("/run/portal-payments", attachHierarchyScope, wrap((req) => exec("sp_nt_GetPortalPayments", { hierarchy: req.hierarchyJson }), 500));
+// TDS taken on each invoice: invoice, supplier (deductee), company + TAN (deductor), section, rate, base, amount
+PaymentNetRouter.get("/tds-records", attachHierarchyScope, wrap(
+  (req) => exec("sp_nt_GetTdsRecords", { hierarchy: req.hierarchyJson, vendor_sno: positiveInt(req.query.vendor_sno) ?? undefined }), 500));
 
 // A batch as the screen gets it: the sender's account number is cut to its last 4 digits.
 const publicBatch = ({ sender_account_no, ...batch }) => ({ ...batch, sender_ac_last4: sender_account_no ? String(sender_account_no).slice(-4) : null });
@@ -222,7 +272,7 @@ PaymentNetRouter.post("/run/proceed", attachHierarchyScope, wrap(async (req) => 
   const hasBank = payment_bank_sno !== undefined && payment_bank_sno !== null && payment_bank_sno !== "";
   if (hasBank && !positiveInt(payment_bank_sno)) throw httpError(400, "Choose the bank account to pay from");
   await requireBankFileSchema();
-  const [batchRows = [], itemRows = []] = await exec("sp_nt_CreatePaymentBatch", {
+  const [batchRows = [], itemRows = [], lineRows = []] = await exec("sp_nt_CreatePaymentBatch", {
     payment_snos: payment_snos.map(Number),
     fund_plan_amount: fund,
     payment_date: /^\d{4}-\d{2}-\d{2}$/.test(String(payment_date ?? "")) ? payment_date : undefined,
@@ -233,7 +283,7 @@ PaymentNetRouter.post("/run/proceed", attachHierarchyScope, wrap(async (req) => 
   const batch = batchRows[0];
   let file;
   try {
-    file = buildPaymentFile(batch, itemRows);
+    file = buildPaymentFile(batch, itemRows, lineRows);
     if (file.lineCount > 0) await exec("sp_nt_SetPaymentBatchFile", { batch_sno: batch.batch_sno, file_name: file.fileName, file_content: file.content });
   } catch (error) {
     // the payments are already paid and journalled - say so instead of letting the run look like it failed
@@ -245,9 +295,12 @@ PaymentNetRouter.post("/run/proceed", attachHierarchyScope, wrap(async (req) => 
     broadcastPaymentUpdated({ payment_sno: o.payment_sno, payment_no: o.payment_no, status: "Processed", com_sno: o.com_sno, div_sno: o.div_sno, brn_sno: o.brn_sno, dept_sno: o.dept_sno },
       { batch_no: batch.batch_no, payment_snos: itemRows.map((i) => i.payment_sno) });
   }
+  const sheet = file.lineCount > 0 ? buildVerificationSheet(batch, itemRows, lineRows) : null;
   return {
-    batch: publicBatch(batch), items: itemRows, skipped: file.skipped,
+    batch: publicBatch(batch), items: itemRows, lines: lineRows, skipped: file.skipped,
     file: { file_name: file.fileName, mime_type: file.mimeType, content: file.content, line_count: file.lineCount, total_amount: file.totalAmount },
+    // what the auditor / payment inputter checks the bank's screen against (invoice-wise, part payments, TDS) - saved by the browser next to the file
+    verification: sheet && { file_name: sheet.fileName, mime_type: sheet.mimeType, content: sheet.content },
   };
 }));
 
@@ -260,26 +313,34 @@ PaymentNetRouter.get("/run/batches", attachHierarchyScope, wrap(async (req) => {
 async function loadBatch(req, withFile) {
   const id = positiveInt(req.params.id);
   if (!id) throw httpError(400, "Invalid batch id");
-  const [batches = [], items = []] = await exec("sp_nt_GetPaymentBatches", { batch_sno: id, hierarchy: req.hierarchyJson, with_file: withFile }, true);
+  const [batches = [], items = [], lines = []] = await exec("sp_nt_GetPaymentBatches", { batch_sno: id, hierarchy: req.hierarchyJson, with_file: withFile }, true);
   if (!batches[0]) throw httpError(404, "Payment run not found, or it is outside your access");
-  return { batch: batches[0], items };
+  return { batch: batches[0], items, lines };
 }
 
 PaymentNetRouter.get("/run/batches/:id", attachHierarchyScope, wrap(async (req) => {
-  const { batch, items } = await loadBatch(req, false);
+  const { batch, items, lines } = await loadBatch(req, false);
   const { file_content: _omit, ...rest } = batch;
-  return { batch: rest, items };
+  return { batch: rest, items, lines };
+}, 500));
+
+// The sheet to check the bank file against: one row per payment x invoice, part payments marked, TDS and what is left (sql/70).
+PaymentNetRouter.get("/run/batches/:id/verification", attachHierarchyScope, wrap(async (req) => {
+  const { batch, items, lines } = await loadBatch(req, false);
+  const sheet = buildVerificationSheet(batch, items, lines);
+  if (sheet.lineCount === 0) throw httpError(404, "This run has no bank transfer, so there is nothing to verify");
+  return { file_name: sheet.fileName, mime_type: sheet.mimeType, content: sheet.content, line_count: sheet.lineCount, total_amount: sheet.totalAmount };
 }, 500));
 
 // The file again (Download on a past run). A run from before sql/68 (no file_type) has its CSV stored; a bank file that was never
 // stored is written again from the batch lines and the sender the run remembers, so it comes out the same.
 PaymentNetRouter.get("/run/batches/:id/file", attachHierarchyScope, wrap(async (req) => {
-  const { batch, items } = await loadBatch(req, true);
+  const { batch, items, lines } = await loadBatch(req, true);
   if (batch.file_content) {
     return { file_name: batch.file_name, mime_type: batch.file_type ? "text/plain;charset=utf-8" : "text/csv;charset=utf-8", content: batch.file_content };
   }
   if (!batch.file_type) throw httpError(404, "No file was stored for this run");
-  const file = buildPaymentFile(batch, items);
+  const file = buildPaymentFile(batch, items, lines);
   if (file.lineCount === 0) throw httpError(404, "This run has no bank transfer, so there is no file");
   await exec("sp_nt_SetPaymentBatchFile", { batch_sno: batch.batch_sno, file_name: file.fileName, file_content: file.content });
   return { file_name: file.fileName, mime_type: file.mimeType, content: file.content };

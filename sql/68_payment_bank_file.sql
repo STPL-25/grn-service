@@ -15,9 +15,10 @@
 --
 -- payment_batch remembers the sender it was paid from (payment_bank_sno + a copy of what the file used), so a later edit of the
 -- master never changes an old run, and the file can be written again identically.
--- The file name and its sequence number are decided here, under the run's lock, so two runs never get the same name.
+-- The file name and its sequence number are decided here, under the run's lock, and reserved in payment_file_creation_no.
+-- The register has a database unique key for each prefix/client/date/number, so .100 can never be created twice on the same day.
 --
---   sp_nt_GetPaymentSenders    the company's active accounts for the run screen (last 4 digits only)
+--   sp_nt_GetPaymentSenders    the company/division/branch's active accounts for the run screen (last 4 digits only)
 --   sp_nt_CreatePaymentBatch   = sql/65 + sender resolution + file name + sender snapshot      (error codes 56111-56114 added)
 --   sp_nt_GetPaymentBatches    = sql/65 + the sender columns
 --
@@ -25,8 +26,8 @@
 -- Rollback: sql/backups/payment_bank_file_2026-10-22_ROLLBACK.sql
 -- ============================================================
 
-IF OBJECT_ID('dbo.payment_bank_master', 'U') IS NULL
-    THROW 56200, N'Run backend-stpl sql/138 first: the Payment Bank master does not exist.', 1;
+IF OBJECT_ID('dbo.payment_bank_master', 'U') IS NULL OR COL_LENGTH('dbo.payment_bank_master', 'file_code') IS NULL
+    THROW 56200, N'Run the latest backend-stpl sql/138 first: the scoped Payment Bank master does not exist.', 1;
 GO
 
 -- ── 1. what a run remembers about its sender ───────────────────────────────
@@ -36,23 +37,86 @@ IF COL_LENGTH('dbo.payment_batch', 'sender_client_code') IS NULL ALTER TABLE dbo
 IF COL_LENGTH('dbo.payment_batch', 'sender_alert_email') IS NULL ALTER TABLE dbo.payment_batch ADD sender_alert_email VARCHAR(100) NULL;
 IF COL_LENGTH('dbo.payment_batch', 'sender_bank_name')   IS NULL ALTER TABLE dbo.payment_batch ADD sender_bank_name NVARCHAR(100) NULL;
 IF COL_LENGTH('dbo.payment_batch', 'sender_account_no')  IS NULL ALTER TABLE dbo.payment_batch ADD sender_account_no VARCHAR(30) NULL;
+IF COL_LENGTH('dbo.payment_batch', 'div_sno')             IS NULL ALTER TABLE dbo.payment_batch ADD div_sno INT NULL;
+IF COL_LENGTH('dbo.payment_batch', 'brn_sno')             IS NULL ALTER TABLE dbo.payment_batch ADD brn_sno INT NULL;
+IF COL_LENGTH('dbo.payment_batch', 'file_no')             IS NULL ALTER TABLE dbo.payment_batch ADD file_no INT NULL;
+GO
+
+-- One row for every bank file number reserved by a successful payment run. Numbers restart from the Payment Bank master's
+-- file_code each date; the unique key is the final backstop against two sessions receiving the same suffix.
+IF OBJECT_ID('dbo.payment_file_creation_no', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.payment_file_creation_no (
+        payment_file_creation_sno BIGINT IDENTITY(1,1) NOT NULL,
+        payment_bank_sno          INT          NOT NULL,
+        file_prefix               VARCHAR(30)  NOT NULL,
+        client_code               VARCHAR(30)  NOT NULL,
+        file_date                 DATE         NOT NULL,
+        file_no                   INT          NOT NULL,
+        file_name                 VARCHAR(200) NOT NULL,
+        batch_sno                 INT          NULL,
+        created_by                VARCHAR(30)  NULL,
+        created_at                DATETIME     NOT NULL CONSTRAINT DF_payment_file_creation_no_created_at DEFAULT GETDATE(),
+        CONSTRAINT PK_payment_file_creation_no PRIMARY KEY (payment_file_creation_sno),
+        CONSTRAINT UQ_payment_file_creation_no_daily UNIQUE (file_prefix, client_code, file_date, file_no),
+        CONSTRAINT UQ_payment_file_creation_no_name_daily UNIQUE (file_date, file_name)
+    );
+END;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_payment_file_creation_no_batch' AND object_id = OBJECT_ID('dbo.payment_file_creation_no'))
+    CREATE UNIQUE INDEX UX_payment_file_creation_no_batch ON dbo.payment_file_creation_no (batch_sno) WHERE batch_sno IS NOT NULL;
+GO
+
+-- Preserve numbers already issued by sql/68 before this register existed. This is what prevents the first run after the upgrade
+-- from allocating .100 again on a date that already has a .100 file.
+UPDATE b
+SET b.div_sno = x.div_sno, b.brn_sno = x.brn_sno
+FROM dbo.payment_batch b
+CROSS APPLY (
+    SELECT CASE WHEN MIN(p.div_sno) = MAX(p.div_sno) THEN MIN(p.div_sno) END AS div_sno,
+           CASE WHEN MIN(p.brn_sno) = MAX(p.brn_sno) THEN MIN(p.brn_sno) END AS brn_sno
+    FROM dbo.payment_batch_item i JOIN dbo.payment_info p ON p.payment_sno = i.payment_sno
+    WHERE i.batch_sno = b.batch_sno
+) x
+WHERE (b.div_sno IS NULL OR b.brn_sno IS NULL) AND x.div_sno IS NOT NULL AND x.brn_sno IS NOT NULL;
+
+UPDATE b
+SET b.file_no = TRY_CAST(RIGHT(b.file_name, CHARINDEX('.', REVERSE(b.file_name)) - 1) AS INT)
+FROM dbo.payment_batch b
+WHERE b.file_no IS NULL AND b.file_name LIKE '%.%' AND CHARINDEX('.', REVERSE(b.file_name)) > 1;
+
+INSERT INTO dbo.payment_file_creation_no (payment_bank_sno, file_prefix, client_code, file_date, file_no, file_name, batch_sno, created_by, created_at)
+SELECT b.payment_bank_sno, pb.file_prefix, pb.client_code, b.batch_date, b.file_no, b.file_name, b.batch_sno, b.created_by, ISNULL(b.created_at, GETDATE())
+FROM dbo.payment_batch b
+JOIN dbo.payment_bank_master pb ON pb.payment_bank_sno = b.payment_bank_sno
+WHERE b.file_name IS NOT NULL AND b.file_no IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM dbo.payment_file_creation_no n WHERE n.batch_sno = b.batch_sno);
 GO
 
 -- ── 2. the company's bank accounts, for the run screen ──────────────────────
--- @jsonInput: { com_sno?, hierarchy? } -> active accounts, the company's default first. Only the last 4 digits of the account go out.
+-- @jsonInput: { com_sno?, div_sno?, brn_sno?, hierarchy? } -> active accounts for that payment scope, default first.
+-- Only the last 4 digits of the account go out.
 CREATE OR ALTER PROCEDURE dbo.sp_nt_GetPaymentSenders
     @jsonInput NVARCHAR(MAX) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @com INT = TRY_CAST(JSON_VALUE(@jsonInput, '$.com_sno') AS INT), @h NVARCHAR(MAX) = JSON_QUERY(@jsonInput, '$.hierarchy');
-    SELECT m.payment_bank_sno, m.com_sno, c.com_name, m.profile_name, m.bank_name, m.branch_name, m.ac_holder_name,
-           RIGHT(m.ac_number, 4) AS ac_last4, m.ifsc, m.file_type, m.client_code, m.alert_email, m.is_default
+    DECLARE @com INT = TRY_CAST(JSON_VALUE(@jsonInput, '$.com_sno') AS INT),
+            @div INT = TRY_CAST(JSON_VALUE(@jsonInput, '$.div_sno') AS INT),
+            @brn INT = TRY_CAST(JSON_VALUE(@jsonInput, '$.brn_sno') AS INT),
+            @h NVARCHAR(MAX) = JSON_QUERY(@jsonInput, '$.hierarchy');
+    SELECT m.payment_bank_sno, m.com_sno, c.com_name, m.div_sno, d.div_name, m.brn_sno, b.brn_name,
+           m.profile_name, m.bank_name, m.branch_name, m.ac_holder_name,
+           RIGHT(m.ac_number, 4) AS ac_last4, m.ifsc, m.file_type, m.client_code, m.file_code, m.alert_email, m.is_default
     FROM dbo.payment_bank_master m
     LEFT JOIN dbo.company_master c ON c.com_sno = m.com_sno
-    WHERE m.is_active = 'Y' AND (@com IS NULL OR m.com_sno = @com)
-      AND (@h IS NULL OR EXISTS (SELECT 1 FROM OPENJSON(@h) WITH (com_sno INT '$.com_sno') x WHERE x.com_sno = m.com_sno))
-    ORDER BY m.com_sno, CASE WHEN m.is_default = 'Y' THEN 0 ELSE 1 END, m.payment_bank_sno;
+    LEFT JOIN dbo.division_master d ON d.div_sno = m.div_sno
+    LEFT JOIN dbo.branch_master b ON b.brn_sno = m.brn_sno
+    WHERE m.is_active = 'Y' AND (@com IS NULL OR m.com_sno = @com) AND (@div IS NULL OR m.div_sno = @div) AND (@brn IS NULL OR m.brn_sno = @brn)
+      AND (@h IS NULL OR EXISTS (SELECT 1 FROM OPENJSON(@h) WITH (com_sno INT '$.com_sno', div_sno INT '$.div_sno', brn_sno INT '$.brn_sno') x
+                                 WHERE x.com_sno = m.com_sno AND (x.div_sno IS NULL OR x.div_sno = m.div_sno) AND (x.brn_sno IS NULL OR x.brn_sno = m.brn_sno)))
+    ORDER BY m.com_sno, m.div_sno, m.brn_sno, CASE WHEN m.is_default = 'Y' THEN 0 ELSE 1 END, m.payment_bank_sno;
 END
 GO
 
@@ -111,8 +175,9 @@ BEGIN
                               WHERE h.com_sno = pi.com_sno AND (h.div_sno IS NULL OR h.div_sno = pi.div_sno) AND (h.brn_sno IS NULL OR h.brn_sno = pi.brn_sno)))
             THROW 56110, 'You do not have access to one or more of the selected payments.', 1;
 
-        IF (SELECT COUNT(DISTINCT ISNULL(pi.com_sno, -1)) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno) > 1
-            THROW 56105, 'A payment file covers one company at a time - untick the payments of the other company.', 1;
+        IF (SELECT COUNT(*) FROM (SELECT DISTINCT ISNULL(pi.com_sno, -1) com_sno, ISNULL(pi.div_sno, -1) div_sno, ISNULL(pi.brn_sno, -1) brn_sno
+                                  FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno) scopes) > 1
+            THROW 56105, 'A payment file covers one company, division and branch at a time - untick payments from the other scope.', 1;
 
         DECLARE @total DECIMAL(18,2) = (SELECT SUM(ISNULL(pi.net_paid, pi.amount)) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno);
         IF @total > @fund + 0.005
@@ -137,31 +202,37 @@ BEGIN
 
         -- the sender: which of the company's bank accounts this run is paid from. Needed only when the file will hold a bank
         -- transfer (a NEFT / RTGS payment to a supplier's account); a run of cheques, cash, portal payments and adjustments has no file.
-        DECLARE @com INT = (SELECT MIN(pi.com_sno) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno);
+        DECLARE @com INT = (SELECT MIN(pi.com_sno) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno),
+                @div INT = (SELECT MIN(pi.div_sno) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno),
+                @brn INT = (SELECT MIN(pi.brn_sno) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno);
         DECLARE @file_lines INT = (
             SELECT COUNT(*) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno
             LEFT JOIN dbo.kyc_basic_info k ON k.kyc_basic_info_sno = pi.vendor_sno
             WHERE ISNULL(pi.net_paid, pi.amount) > 0 AND ISNULL(k.pay_via_portal, 'N') <> 'Y' AND UPPER(pi.mode) IN ('NEFT', 'RTGS'));
-        DECLARE @pb INT = NULL, @pb_type VARCHAR(20), @pb_prefix VARCHAR(30), @pb_client VARCHAR(30), @pb_email VARCHAR(100), @pb_bank NVARCHAR(100), @pb_acno VARCHAR(30);
+        DECLARE @pb INT = NULL, @pb_type VARCHAR(20), @pb_prefix VARCHAR(30), @pb_client VARCHAR(30), @pb_file_code INT,
+                @pb_email VARCHAR(100), @pb_bank NVARCHAR(100), @pb_acno VARCHAR(30);
         IF @file_lines > 0
         BEGIN
             IF @bank_sno IS NOT NULL
             BEGIN
-                SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master WHERE payment_bank_sno = @bank_sno AND is_active = 'Y' AND com_sno = @com;
-                IF @pb IS NULL THROW 56113, N'The chosen bank account is not available for this company (or it was switched off). Choose another.', 1;
+                SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master
+                WHERE payment_bank_sno = @bank_sno AND is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn;
+                IF @pb IS NULL THROW 56113, N'The chosen bank account is not available for this company/division/branch (or it was switched off). Choose another.', 1;
             END
             ELSE
             BEGIN
-                SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master WHERE is_active = 'Y' AND com_sno = @com AND is_default = 'Y';
+                SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master
+                WHERE is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn AND is_default = 'Y';
                 IF @pb IS NULL
                 BEGIN
-                    DECLARE @n_banks INT = (SELECT COUNT(*) FROM dbo.payment_bank_master WHERE is_active = 'Y' AND com_sno = @com);
-                    IF @n_banks = 0 THROW 56111, N'No bank account to pay from is set up for this company. Add one in Masters > Payment Bank, then run again.', 1;
-                    IF @n_banks > 1 THROW 56112, N'This company has more than one bank account to pay from - choose which one this run is paid from.', 1;
-                    SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master WHERE is_active = 'Y' AND com_sno = @com;
+                    DECLARE @n_banks INT = (SELECT COUNT(*) FROM dbo.payment_bank_master WHERE is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn);
+                    IF @n_banks = 0 THROW 56111, N'No bank account is set up for this company/division/branch. Add one in Masters > Payment Bank, then run again.', 1;
+                    IF @n_banks > 1 THROW 56112, N'This company/division/branch has more than one bank account - choose which one this run is paid from.', 1;
+                    SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master WHERE is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn;
                 END
             END
-            SELECT @pb_type = file_type, @pb_prefix = file_prefix, @pb_client = client_code, @pb_email = alert_email, @pb_bank = bank_name, @pb_acno = ac_number
+            SELECT @pb_type = file_type, @pb_prefix = file_prefix, @pb_client = client_code, @pb_file_code = file_code,
+                   @pb_email = alert_email, @pb_bank = bank_name, @pb_acno = ac_number
             FROM dbo.payment_bank_master WHERE payment_bank_sno = @pb;
             IF @pb_type <> 'BANK_UPLOAD' THROW 56114, N'This bank account has a payment file type the run cannot write yet.', 1;
         END
@@ -170,24 +241,31 @@ BEGIN
         SELECT @seq = ISNULL(MAX(TRY_CAST(RIGHT(batch_no, 6) AS INT)), 0) + 1 FROM dbo.payment_batch WITH (UPDLOCK, HOLDLOCK) WHERE batch_no LIKE 'PB-' + @year + '-%';
         SET @bno = 'PB-' + @year + '-' + RIGHT('000000' + CAST(@seq AS VARCHAR(6)), 6);
 
-        -- the file name: <prefix>_<client>_<client><DDMM>.<seq>. The sequence counts the files of that name made before, from 100.
-        DECLARE @fname VARCHAR(200) = NULL;
+        -- The file name: <prefix>_<client>_<client><DDMM>.<seq>. Reserve its number in the daily register while the run lock
+        -- is held. The unique constraint is a second concurrency guard, independent of payment_batch/file-name parsing.
+        DECLARE @fname VARCHAR(200) = NULL, @fseq INT = NULL, @file_creation_sno BIGINT = NULL;
         IF @pb IS NOT NULL
         BEGIN
             DECLARE @base VARCHAR(120) = @pb_prefix + '_' + @pb_client + '_' + @pb_client
                                          + RIGHT('0' + CAST(DAY(@vdate) AS VARCHAR(2)), 2) + RIGHT('0' + CAST(MONTH(@vdate) AS VARCHAR(2)), 2);
-            DECLARE @fseq INT = ISNULL((SELECT MAX(TRY_CAST(SUBSTRING(file_name, LEN(@base) + 2, 10) AS INT))
-                                        FROM dbo.payment_batch WITH (UPDLOCK, HOLDLOCK)
-                                        WHERE LEFT(file_name, LEN(@base) + 1) = @base + '.'), 99) + 1;
+            SELECT @fseq = ISNULL(MAX(file_no) + 1, @pb_file_code)
+            FROM dbo.payment_file_creation_no WITH (UPDLOCK, HOLDLOCK)
+            WHERE file_prefix = @pb_prefix AND client_code = @pb_client AND file_date = @vdate;
+            IF @fseq < @pb_file_code SET @fseq = @pb_file_code;
             SET @fname = @base + '.' + CAST(@fseq AS VARCHAR(10));
+            INSERT INTO dbo.payment_file_creation_no (payment_bank_sno, file_prefix, client_code, file_date, file_no, file_name, created_by)
+            VALUES (@pb, @pb_prefix, @pb_client, @vdate, @fseq, @fname, @by);
+            SET @file_creation_sno = SCOPE_IDENTITY();
         END
 
-        INSERT INTO dbo.payment_batch (batch_no, batch_date, com_sno, fund_plan_amount, total_amount, item_count, status, created_by,
-                                       file_name, payment_bank_sno, file_type, sender_client_code, sender_alert_email, sender_bank_name, sender_account_no)
-        SELECT @bno, @vdate, MIN(pi.com_sno), @fund, @total, COUNT(*), 'Generated', @by,
-               @fname, @pb, @pb_type, @pb_client, @pb_email, @pb_bank, @pb_acno
+        INSERT INTO dbo.payment_batch (batch_no, batch_date, com_sno, div_sno, brn_sno, fund_plan_amount, total_amount, item_count, status, created_by,
+                                       file_name, file_no, payment_bank_sno, file_type, sender_client_code, sender_alert_email, sender_bank_name, sender_account_no)
+        SELECT @bno, @vdate, MIN(pi.com_sno), MIN(pi.div_sno), MIN(pi.brn_sno), @fund, @total, COUNT(*), 'Generated', @by,
+               @fname, @fseq, @pb, @pb_type, @pb_client, @pb_email, @pb_bank, @pb_acno
         FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno;
         SET @bsno = SCOPE_IDENTITY();
+        IF @file_creation_sno IS NOT NULL
+            UPDATE dbo.payment_file_creation_no SET batch_sno = @bsno WHERE payment_file_creation_sno = @file_creation_sno;
 
         INSERT INTO dbo.payment_batch_item (batch_sno, payment_sno, line_no, vendor_sno, vendor_name, supp_code, vendor_email, amount, mode, debit_account, channel,
                                             beneficiary_name, account_no, ifsc, bank_name, branch_name, invoice_nos, supplier_invoice_nos, msme_label, narration)
@@ -261,9 +339,9 @@ BEGIN
         THROW;
     END CATCH
 
-    SELECT b.batch_sno, b.batch_no, b.batch_date, b.com_sno, b.fund_plan_amount, b.total_amount, b.item_count, b.status, b.created_by,
+    SELECT b.batch_sno, b.batch_no, b.batch_date, b.com_sno, b.div_sno, b.brn_sno, b.fund_plan_amount, b.total_amount, b.item_count, b.status, b.created_by,
            CONVERT(VARCHAR(30), b.created_at, 120) AS created_at,
-           b.file_name, b.payment_bank_sno, b.file_type, b.sender_client_code, b.sender_alert_email, b.sender_bank_name, b.sender_account_no
+           b.file_name, b.file_no, b.payment_bank_sno, b.file_type, b.sender_client_code, b.sender_alert_email, b.sender_bank_name, b.sender_account_no
     FROM dbo.payment_batch b WHERE b.batch_sno = @bsno;
     SELECT i.batch_item_sno, i.batch_sno, i.payment_sno, p.payment_no, i.line_no, i.vendor_sno, i.vendor_name, i.supp_code, i.vendor_email, i.amount, i.mode, i.debit_account,
            i.channel, i.beneficiary_name, i.account_no, i.ifsc, i.bank_name, i.branch_name, i.invoice_nos, i.supplier_invoice_nos, i.msme_label, i.narration,
@@ -301,17 +379,21 @@ BEGIN
             @withFile BIT = CASE WHEN JSON_VALUE(@jsonInput, '$.with_file') IN ('1', 'true') THEN 1 ELSE 0 END,
             @limit INT = ISNULL(TRY_CAST(JSON_VALUE(@jsonInput, '$.limit') AS INT), 30);
 
-    SELECT TOP (@limit) b.batch_sno, b.batch_no, b.batch_date, b.com_sno, c.com_name, b.fund_plan_amount, b.total_amount, b.item_count, b.status,
+    SELECT TOP (@limit) b.batch_sno, b.batch_no, b.batch_date, b.com_sno, c.com_name, b.div_sno, d.div_name, b.brn_sno, br.brn_name,
+           b.fund_plan_amount, b.total_amount, b.item_count, b.status,
            b.file_name, CASE WHEN @withFile = 1 AND @bsno IS NOT NULL THEN b.file_content END AS file_content,
            CAST(CASE WHEN b.file_content IS NULL THEN 0 ELSE 1 END AS BIT) AS has_file,
-           b.file_type, b.payment_bank_sno, pb.profile_name AS sender_name, b.sender_bank_name, RIGHT(b.sender_account_no, 4) AS sender_ac_last4,
+           b.file_no, b.file_type, b.payment_bank_sno, pb.profile_name AS sender_name, b.sender_bank_name, RIGHT(b.sender_account_no, 4) AS sender_ac_last4,
            b.sender_client_code, b.sender_alert_email,
            b.created_by, CONVERT(VARCHAR(30), b.created_at, 120) AS created_at
     FROM dbo.payment_batch b
     LEFT JOIN dbo.company_master c ON c.com_sno = b.com_sno
+    LEFT JOIN dbo.division_master d ON d.div_sno = b.div_sno
+    LEFT JOIN dbo.branch_master br ON br.brn_sno = b.brn_sno
     LEFT JOIN dbo.payment_bank_master pb ON pb.payment_bank_sno = b.payment_bank_sno
     WHERE (@bsno IS NULL OR b.batch_sno = @bsno)
-      AND (@hier IS NULL OR EXISTS (SELECT 1 FROM OPENJSON(@hier) WITH (com_sno INT '$.com_sno') h WHERE h.com_sno = b.com_sno))
+      AND (@hier IS NULL OR EXISTS (SELECT 1 FROM OPENJSON(@hier) WITH (com_sno INT '$.com_sno', div_sno INT '$.div_sno', brn_sno INT '$.brn_sno') h
+                                    WHERE h.com_sno = b.com_sno AND (h.div_sno IS NULL OR h.div_sno = b.div_sno) AND (h.brn_sno IS NULL OR h.brn_sno = b.brn_sno)))
     ORDER BY b.batch_sno DESC;
 
     SELECT i.batch_item_sno, i.batch_sno, i.payment_sno, p.payment_no, i.line_no, i.vendor_sno, i.vendor_name, i.supp_code, i.vendor_email, i.amount, i.mode, i.debit_account,

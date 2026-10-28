@@ -39,8 +39,12 @@ class InvoiceService {
     return this.repo.getPendingInvoiceMatches();
   }
 
-  static async getVendorDrivenBillableChildPOs(vendor_sno) {
-    return this.repo.getVendorDrivenBillableChildPOs(vendor_sno);
+  static async getVendorDrivenBillableChildPOs(vendor_sno, from_date, to_date) {
+    return this.repo.getVendorDrivenBillableChildPOs(vendor_sno, from_date, to_date);
+  }
+
+  static async getVendorBillConsolidations(vendor_sno) {
+    return this.repo.getVendorBillConsolidations(vendor_sno);
   }
 
   // Consolidates several Vendor-Driven child POs (spanning multiple delivery
@@ -53,7 +57,14 @@ class InvoiceService {
   // po_basic_snos — same reasoning as every other "never trust the client
   // for money" precedent in this codebase. One PO's failure doesn't abort
   // the rest — each result is reported independently.
-  static async consolidateVendorDrivenBills({ vendor_sno, po_basic_snos, created_by }) {
+  //
+  // The invoices raised in one action are then tied together under ONE
+  // consolidated bill (VBC-yyyy-nnnnnn, sp_nt_CreateVendorBillConsolidation)
+  // for the period, which the Payment screen shows and pays as a unit through
+  // the normal payment approval + Payment Run. Bills of different
+  // company / division / branch / department are refused up front: they
+  // follow different payment approvals.
+  static async consolidateVendorDrivenBills({ vendor_sno, po_basic_snos, period_from, period_to, created_by }) {
     if (!vendor_sno) throw new Error("vendor_sno is required");
     if (!Array.isArray(po_basic_snos) || po_basic_snos.length === 0) {
       throw new Error("At least one po_basic_sno is required");
@@ -63,6 +74,11 @@ class InvoiceService {
     const billable = await this.repo.getVendorDrivenBillableChildPOs(vendor_sno);
     const wanted = new Set(po_basic_snos.map(Number));
     const targets = billable.filter((po) => wanted.has(po.po_basic_sno));
+
+    const orgs = new Set(targets.map((po) => [po.com_sno, po.div_sno, po.brn_sno, po.dept_sno].join("/")));
+    if (orgs.size > 1) {
+      throw new Error("The selected POs belong to different company / division / branch / department - consolidate each one separately, because they follow different payment approvals.");
+    }
 
     const results = [];
     for (const po of targets) {
@@ -116,7 +132,14 @@ class InvoiceService {
       results.push({ po_basic_sno: sno, result: "ERROR", error: "Not currently billable (already invoiced, no GRN yet, or not found for this vendor)" });
     }
 
-    return results;
+    const invoice_snos = results.filter((r) => r.result === "SUCCESS").map((r) => r.invoice_sno);
+    let consolidation = null;
+    if (invoice_snos.length > 0) {
+      const rows = await this.repo.createVendorBillConsolidation({ vendor_sno, period_from, period_to, invoice_snos, created_by });
+      consolidation = rows[0] ?? null;
+    }
+
+    return { results, consolidation };
   }
 }
 

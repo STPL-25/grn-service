@@ -1,11 +1,11 @@
 // paymentFile.js - the bank payment file of a Payment Run: 28 comma separated positions per NEFT / RTGS transfer, no header,
 // only real bank transfers, and nothing in a value that could shift a position.
 import { describe, it, expect } from "@jest/globals";
-import { buildPaymentFile, referenceOf, POSITION_COUNT, FILE_TYPES } from "../src/paymentnet/paymentFile.js";
+import { buildPaymentFile, buildVerificationSheet, referenceOf, invoiceText, kindText, deductionText, POSITION_COUNT, FILE_TYPES } from "../src/paymentnet/paymentFile.js";
 
 const batch = (over = {}) => ({
   batch_no: "PB-2026-000007", batch_date: new Date("2026-10-22T00:00:00.000Z"), file_type: FILE_TYPES.BANK_UPLOAD,
-  file_name: "SPACETEX_SPA311_SPA3112210.100", sender_alert_email: "payment.ktm@scmts.net", ...over,
+  file_name: "SPACETEX_SPA311_SPA3112210.100", sender_alert_email: null, ...over,
 });
 const item = (over = {}) => ({
   payment_no: "PAY-2026-000011", vendor_sno: 122, mode: "NEFT", amount: 124277.76, channel: "BANK",
@@ -26,7 +26,7 @@ describe("buildPaymentFile - the bank upload file", () => {
     expect(f.totalAmount).toBe(139277.76);
   });
 
-  it("puts each value in its position: type, account, amount, name, reference, date, IFSC, bank, branch, e-mail - the rest stay empty", () => {
+  it("puts each value in its position: type, account, amount, name, reference, date, IFSC, bank, branch - the rest stay empty (no e-mail)", () => {
     const [line] = lines(buildPaymentFile(batch(), [item()]));
     const f = fields(line);
     expect(f[0]).toBe("N");                          // 1  transfer type
@@ -39,8 +39,8 @@ describe("buildPaymentFile - the bank upload file", () => {
     expect(f[24]).toBe("KKBK0000961");               // 25 IFSC (upper case)
     expect(f[25]).toBe("KOTAK MAHINDRA BANK LIMITED"); // 26 bank
     expect(f[26]).toBe("KALBADEVI");                 // 27 branch
-    expect(f[27]).toBe("payment.ktm@scmts.net");     // 28 e-mail
-    const used = new Set([0, 2, 3, 4, 13, 22, 24, 25, 26, 27]);
+    expect(f[27]).toBe("");                           // 28 e-mail: not written any more
+    const used = new Set([0, 2, 3, 4, 13, 22, 24, 25, 26]);
     expect(f.every((v, i) => used.has(i) || v === "")).toBe(true);
   });
 
@@ -74,8 +74,10 @@ describe("buildPaymentFile - the bank upload file", () => {
     expect(fields(line)[4]).toBe("A B");
   });
 
-  it("leaves the e-mail position empty when the sender has no alert e-mail", () => {
-    expect(fields(lines(buildPaymentFile(batch({ sender_alert_email: null }), [item()]))[0])[27]).toBe("");
+  it("never writes the sender's alert e-mail, even when the run still remembers one", () => {
+    const f = buildPaymentFile(batch({ sender_alert_email: "payment.ktm@scmts.net" }), [item()]);
+    expect(fields(lines(f)[0])[27]).toBe("");
+    expect(f.content).not.toMatch(/@/);
   });
 
   it("keeps cheque / cash / DD, portal, fully-adjusted and UPI payments out of the file and says why", () => {
@@ -130,5 +132,118 @@ describe("referenceOf - supplier id and payment number, at most 20 characters", 
   it("is the payment number alone when there is no supplier id, and never longer than 20", () => {
     expect(referenceOf({ vendor_sno: null, payment_no: "PAY-2026-000009" })).toBe("PAY2026000009");
     expect(referenceOf({ vendor_sno: 5, payment_no: "P".repeat(30) })).toHaveLength(20);
+  });
+});
+
+// ── invoice numbers, part payments and the verification sheet (sql/70) ──────
+const invLine = (over = {}) => ({
+  batch_item_sno: 1, payment_sno: 55, invoice_sno: 9, invoice_no: "INV-2026-000006", supplier_invoice_no: "inv1256", invoice_date: "2026-10-02T00:00:00.000Z",
+  invoice_amount: 85000, gst_amount: 12966.1, payable_total: 85000, paid_before: 0, this_gross: 72033.9, tds_amount: 720, balance_after: 12966.1,
+  awaiting_2b: true, part_no: 1, kind: "PART", ...over,
+});
+const paid = (over = {}) => item({ payment_sno: 55, batch_item_sno: 1, amount: 71313.9, tds_amount: 720, advance_amount: 0, note_amount: 0, ...over });
+
+describe("buildPaymentFile - what identifies a transfer once the file is on the bank's screen", () => {
+  it("shows the supplier's invoice number in position 15 so the checker can tell the transfers apart", () => {
+    const f = fields(lines(buildPaymentFile(batch(), [paid()], [invLine()]))[0]);
+    expect(f).toHaveLength(POSITION_COUNT);
+    expect(f[14]).toBe("inv1256");
+  });
+
+  it("marks a part payment in position 16 with this payment's share of the invoice, so it is not mistaken for a short payment", () => {
+    const f = fields(lines(buildPaymentFile(batch(), [paid()], [invLine()]))[0]);
+    expect(f[15]).toBe("PART 72033.90/85000.00");
+  });
+
+  it("writes FULL for an invoice paid whole, and FINAL for the last part", () => {
+    expect(fields(lines(buildPaymentFile(batch(), [paid()], [invLine({ kind: "FULL", this_gross: 85000, balance_after: 0, part_no: 1 })]))[0])[15]).toBe("FULL");
+    expect(fields(lines(buildPaymentFile(batch(), [paid()], [invLine({ kind: "FINAL", this_gross: 12966.1, paid_before: 72033.9, balance_after: 0, part_no: 2 })]))[0])[15]).toBe("FINAL 12966.10/85000.00");
+  });
+
+  it("says what was taken off in position 17: TDS, advance, debit / credit notes", () => {
+    const f = fields(lines(buildPaymentFile(batch(), [paid({ tds_amount: 720, advance_amount: 5000, note_amount: 250 })], [invLine()]))[0]);
+    expect(f[16]).toBe("TDS 720 ADV 5000 DN 250");
+    expect(deductionText({ tds_amount: 0, advance_amount: 0, note_amount: -90 })).toBe("CN 90");
+    expect(deductionText({ tds_amount: 0, advance_amount: 0, note_amount: 0 })).toBe("");
+  });
+
+  it("joins several invoices with / and keeps every position within 30 characters", () => {
+    const many = [invLine({ supplier_invoice_no: "AAAAAAAAAAAAAAA" }), invLine({ invoice_sno: 10, supplier_invoice_no: "BBBBBBBBBBBBBBB" }), invLine({ invoice_sno: 11, supplier_invoice_no: "CCCCCCCCCCCCCCC" })];
+    const f = fields(lines(buildPaymentFile(batch(), [paid()], many))[0]);
+    expect(f[14].length).toBeLessThanOrEqual(30);
+    expect(f[14]).toBe("AAAAAAAAAAAAAAA+2");   // whole invoice numbers only: what does not fit is counted
+    expect(f[15]).toBe("3 INV 3 PART");
+    expect(f[16].length).toBeLessThanOrEqual(30);
+    expect(invoiceText({}, [invLine({ supplier_invoice_no: "A1" }), invLine({ supplier_invoice_no: "B2" })])).toBe("A1/B2");
+    expect(deductionText({ tds_amount: 1234567.5, advance_amount: 7654321.25, note_amount: 999999.99 })).toBe("TDS 1234567.50+2");
+  });
+
+  it("falls back to our invoice number when the supplier's is missing, and to what the item kept for a run from before sql/70", () => {
+    expect(invoiceText({}, [invLine({ supplier_invoice_no: null })])).toBe("INV-2026-000006");
+    expect(invoiceText({ supplier_invoice_nos: "S-1, S-2" }, [])).toBe("S-1/S-2");
+    expect(kindText([])).toBe("");
+    expect(fields(lines(buildPaymentFile(batch(), [item({ supplier_invoice_nos: "S-9" })]))[0])[14]).toBe("S-9");
+  });
+
+  it("only matches a payment with its own invoice lines", () => {
+    const f = buildPaymentFile(batch(), [paid({ payment_sno: 55 }), paid({ payment_sno: 56, batch_item_sno: 2, payment_no: "P2" })],
+      [invLine({ payment_sno: 55, supplier_invoice_no: "ONE" }), invLine({ payment_sno: 56, batch_item_sno: 2, supplier_invoice_no: "TWO" })]);
+    expect(lines(f).map((l) => fields(l)[14])).toEqual(["ONE", "TWO"]);
+  });
+
+  it("keeps a comma in an invoice number from shifting the positions", () => {
+    const f = fields(lines(buildPaymentFile(batch(), [paid()], [invLine({ supplier_invoice_no: "A,B/1" })]))[0]);
+    expect(f).toHaveLength(POSITION_COUNT);
+    expect(f[14]).toBe("A B/1");
+  });
+});
+
+describe("buildVerificationSheet - what the auditor checks the bank screen against", () => {
+  const rows = (sheet) => sheet.content.split("\r\n").map((r) => r.split(","));
+  const sheetFor = (its, ls) => buildVerificationSheet(batch(), its, ls);
+
+  it("is named after the bank file and counts the same transfers and total as the file", () => {
+    const its = [paid(), paid({ payment_sno: 56, batch_item_sno: 2, payment_no: "P2", amount: 1000, tds_amount: 0 }), item({ payment_no: "CHQ", channel: "MANUAL", mode: "Cheque", amount: 500 })];
+    const file = buildPaymentFile(batch(), its, []);
+    const sheet = sheetFor(its, []);
+    expect(sheet.fileName).toBe("SPACETEX_SPA311_SPA3112210_verification.csv");
+    expect(sheet.lineCount).toBe(file.lineCount);
+    expect(sheet.totalAmount).toBe(file.totalAmount);
+    expect(sheet.content).not.toMatch(/CHQ/);
+  });
+
+  it("has one row per payment x invoice, the net amount only on the first row of a payment, and totals at the foot", () => {
+    const two = [invLine(), invLine({ invoice_sno: 10, invoice_no: "INV-2", supplier_invoice_no: "inv-2", kind: "FULL", this_gross: 500, payable_total: 500, balance_after: 0, awaiting_2b: false, tds_amount: 0 })];
+    const r = rows(sheetFor([paid({ amount: 71813.9 })], two));
+    const header = r.find((x) => x[0] === "File line");
+    const col = (name) => header.indexOf(name);
+    const data = r.filter((x) => x[0] === "1");
+    expect(data).toHaveLength(2);
+    expect(data[0][col("Sent to bank (this payment)")]).toBe("71813.90");
+    expect(data[1][col("Sent to bank (this payment)")]).toBe("");
+    expect(data[0][col("Full / part")]).toBe("Part payment");
+    expect(data[0][col("Still to pay on invoice")]).toBe("12966.10");
+    expect(data[0][col("GST waiting for GSTR-2B")]).toBe("12966.10");
+    expect(data[1][col("Full / part")]).toBe("Full payment");
+    const total = r.find((x) => x[0] === "TOTAL");
+    expect(total[col("Sent to bank (this payment)")]).toBe("71813.90");
+    expect(total[col("Paid in this payment")]).toBe("72533.90");
+  });
+
+  it("shows only the last four digits of the supplier's account", () => {
+    const r = sheetFor([paid()], [invLine()]);
+    expect(r.content).toContain(",7145,");
+    expect(r.content).not.toContain("7312577145");
+  });
+
+  it("quotes a value that holds a comma", () => {
+    const r = sheetFor([paid({ vendor_name: "A, B & Co" })], [invLine()]);
+    expect(r.content).toContain('"A, B & Co"');
+  });
+
+  it("still lists a run from before sql/70, from what its items kept", () => {
+    const r = sheetFor([item({ payment_sno: 70, supplier_invoice_nos: "S-9", amount: 100, tds_amount: null })], []);
+    expect(r.lineCount).toBe(1);
+    expect(r.content).toContain("S-9");
   });
 });

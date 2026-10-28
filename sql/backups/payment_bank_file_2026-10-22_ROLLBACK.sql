@@ -3,8 +3,8 @@
 -- 1. restores the two procedures 68 replaced (sp_nt_CreatePaymentBatch, sp_nt_GetPaymentBatches), exactly as they were live before 68
 --    (the sql/65 versions, dumped with OBJECT_DEFINITION on 2026-10-22 before 68 was applied)
 -- 2. drops sp_nt_GetPaymentSenders
--- The six sender columns 68 added to payment_batch (payment_bank_sno, file_type, sender_*) are LEFT IN PLACE: they are additive and hold
--- the sender of every run made since. Runs made under 68 keep their bank file (payment_batch.file_content) and stay downloadable.
+-- The additive sender/scope/file-number columns and payment_file_creation_no register are LEFT IN PLACE: they hold audit history.
+-- Runs made under 68 keep their bank file (payment_batch.file_content) and stay downloadable.
 --
 -- This undoes the DATABASE side only. The service and screen code of the same change (grn-service src/paymentnet/paymentFile.js and
 -- paymentnet.routes.js, nt-frontend-stpl PaymentRunPage.tsx / paymentRunModel.ts / paymentNetApi.ts) writes and expects the bank file

@@ -151,6 +151,20 @@ class SupplierService {
     return this.repo.getDebitNotesForSupplier(kyc_basic_info_sno);
   }
 
+  static async getPayments(kyc_basic_info_sno) {
+    return this.repo.getPaymentsForSupplier(kyc_basic_info_sno);
+  }
+
+  static async getCreditNotes(kyc_basic_info_sno) {
+    return this.repo.getCreditNotesForSupplier(kyc_basic_info_sno);
+  }
+
+  static async getCreditNoteDetail(kyc_basic_info_sno, credit_note_sno) {
+    const [note] = await this.repo.getCreditNoteDetailForSupplier(kyc_basic_info_sno, credit_note_sno);
+    if (!note) throw new Error("Credit note not found.");
+    return note;
+  }
+
   static async getDebitNoteDetail(kyc_basic_info_sno, debit_note_sno) {
     const [note] = await this.repo.getDebitNoteDetailForSupplier(kyc_basic_info_sno, debit_note_sno);
     if (!note) throw new Error("Debit note not found.");

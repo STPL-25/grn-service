@@ -76,6 +76,28 @@ class SupplierRepository {
     return this.executeStoredProcedure("sp_nt_GetDebitNotesForSupplier", { kyc_basic_info_sno });
   }
 
+  async getPaymentsForSupplier(kyc_basic_info_sno) {
+    // two recordsets (payments, then advances) - executeStoredProcedure() only exposes the first
+    try {
+      const pool = await initializeDatabase();
+      const request = pool.request();
+      request.input("jsonInput", mssql.NVarChar(mssql.MAX), JSON.stringify({ kyc_basic_info_sno }));
+      const result = await request.execute("sp_nt_GetPaymentsForSupplier");
+      return { payments: result.recordsets[0] ?? [], advances: result.recordsets[1] ?? [] };
+    } catch (error) {
+      throw new Error(`Database error: ${error.message}`);
+    }
+  }
+
+  // credit notes (sql/71): raised when more arrived than the supplier invoiced - they add to what the supplier is paid
+  async getCreditNotesForSupplier(kyc_basic_info_sno) {
+    return this.executeStoredProcedure("sp_nt_GetCreditNotesForSupplier", { kyc_basic_info_sno });
+  }
+
+  async getCreditNoteDetailForSupplier(kyc_basic_info_sno, credit_note_sno) {
+    return this.executeStoredProcedure("sp_nt_GetCreditNoteDetailForSupplier", { kyc_basic_info_sno, credit_note_sno });
+  }
+
   async getDebitNoteDetailForSupplier(kyc_basic_info_sno, debit_note_sno) {
     console.log("Fetching debit note detail for supplier:", { kyc_basic_info_sno, debit_note_sno });
     return this.executeStoredProcedure("sp_nt_GetDebitNoteDetailForSupplier", { kyc_basic_info_sno, debit_note_sno });

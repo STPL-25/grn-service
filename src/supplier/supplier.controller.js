@@ -167,6 +167,34 @@ class SupplierController {
     }
   }
 
+  static async getPayments(req, res) {
+    try {
+      const data = await SupplierService.getPayments(req.supplier.kyc_basic_info_sno);
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getCreditNotes(req, res) {
+    try {
+      const data = await SupplierService.getCreditNotes(req.supplier.kyc_basic_info_sno);
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  static async getCreditNoteDetail(req, res) {
+    try {
+      const { credit_note_sno } = req.params;
+      const data = await SupplierService.getCreditNoteDetail(req.supplier.kyc_basic_info_sno, Number(credit_note_sno));
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(404).json({ success: false, error: error.message });
+    }
+  }
+
   static async getDebitNoteDetail(req, res) {
     try {
       const { debit_note_sno } = req.params;

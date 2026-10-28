@@ -52,8 +52,16 @@ class InvoiceRepository {
     return this.executeStoredProcedure("sp_nt_GetPendingInvoiceMatches");
   }
 
-  async getVendorDrivenBillableChildPOs(vendor_sno) {
-    return this.executeStoredProcedure("sp_nt_GetVendorDrivenBillableChildPOs", { vendor_sno });
+  async getVendorDrivenBillableChildPOs(vendor_sno, from_date, to_date) {
+    return this.executeStoredProcedure("sp_nt_GetVendorDrivenBillableChildPOs", { vendor_sno, from_date: from_date || undefined, to_date: to_date || undefined });
+  }
+
+  async createVendorBillConsolidation(payload) {
+    return this.executeStoredProcedure("sp_nt_CreateVendorBillConsolidation", payload);
+  }
+
+  async getVendorBillConsolidations(vendor_sno) {
+    return this.executeStoredProcedure("sp_nt_GetVendorBillConsolidations", { vendor_sno: vendor_sno || undefined });
   }
 }
 
