@@ -1,0 +1,278 @@
+-- ── 8. the run: no alert e-mail any more, per-invoice snapshot, gross / TDS / advance / notes on each item ──
+-- ── 5. a run refuses a portal supplier's payment ──
+-- ── 3. the run: pay what today's fund covers ────────────────────────────────
+-- @jsonInput: { payment_snos: [..in the order they should appear in the file], fund_plan_amount, created_by, payment_date?, hierarchy?,
+--               payment_bank_sno? }   (payment_bank_sno: the account to pay from; default = the company's default / only account)
+-- Marks the payments 'Processed', snapshots the payee bank details, and posts each payment's journal. -> batch row, items.
+CREATE   PROCEDURE dbo.sp_nt_CreatePaymentBatch
+    @jsonInput NVARCHAR(MAX)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    DECLARE @list NVARCHAR(MAX) = JSON_QUERY(@jsonInput, '$.payment_snos'),
+            @fund DECIMAL(18,2) = TRY_CAST(JSON_VALUE(@jsonInput, '$.fund_plan_amount') AS DECIMAL(18,2)),
+            @by VARCHAR(30) = JSON_VALUE(@jsonInput, '$.created_by'),
+            @vdate DATE = ISNULL(TRY_CAST(JSON_VALUE(@jsonInput, '$.payment_date') AS DATE), CAST(GETDATE() AS DATE)),
+            @hier NVARCHAR(MAX) = JSON_QUERY(@jsonInput, '$.hierarchy'),
+            @bank_sno INT = TRY_CAST(JSON_VALUE(@jsonInput, '$.payment_bank_sno') AS INT);
+    IF @by IS NULL THROW 56100, 'created_by is required.', 1;
+
+    DECLARE @raw TABLE (line_no INT, payment_sno INT);
+    INSERT INTO @raw SELECT TRY_CAST(j.[key] AS INT) + 1, TRY_CAST(j.value AS INT) FROM OPENJSON(@list) j;
+    IF NOT EXISTS (SELECT 1 FROM @raw) OR EXISTS (SELECT 1 FROM @raw WHERE payment_sno IS NULL) THROW 56101, 'Select at least one payment.', 1;
+    DECLARE @sel TABLE (line_no INT, payment_sno INT PRIMARY KEY);
+    INSERT INTO @sel SELECT MIN(line_no), payment_sno FROM @raw GROUP BY payment_sno;
+    IF @fund IS NULL OR @fund <= 0 THROW 56103, 'Enter today''s fund plan before proceeding.', 1;
+
+    DECLARE @h_pay INT = (SELECT head_sno FROM dbo.acct_account_head WHERE system_key = 'SUPPLIER_PAYABLE'),
+            @h_tds INT = (SELECT head_sno FROM dbo.acct_account_head WHERE system_key = 'TDS_PAYABLE'),
+            @h_adv INT = (SELECT head_sno FROM dbo.acct_account_head WHERE system_key = 'ADVANCE_SUPPLIER'),
+            @h_bank INT = (SELECT head_sno FROM dbo.acct_account_head WHERE system_key = 'BANK'),
+            @h_dn INT = (SELECT head_sno FROM dbo.acct_account_head WHERE system_key = 'DN_ADJ');
+    IF @h_pay IS NULL OR @h_tds IS NULL OR @h_adv IS NULL OR @h_bank IS NULL OR @h_dn IS NULL THROW 56108, 'System account heads are missing.', 1;
+
+    DECLARE @bsno INT, @bno VARCHAR(30);
+    BEGIN TRANSACTION;
+    BEGIN TRY
+        DECLARE @lk INT;
+        EXEC @lk = sp_getapplock @Resource = N'pay_run_batch', @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 15000;
+        IF @lk < 0 THROW 56107, 'Another payment run is being created right now - please try again in a moment.', 1;
+
+        DECLARE @bad NVARCHAR(500) = (
+            SELECT STRING_AGG(ISNULL(pi.payment_no, CAST(s.payment_sno AS VARCHAR(12))), ', ')
+            FROM @sel s LEFT JOIN dbo.payment_info pi WITH (UPDLOCK, HOLDLOCK) ON pi.payment_sno = s.payment_sno
+            WHERE pi.payment_sno IS NULL OR pi.is_active <> 'Y' OR pi.status <> 'Approved' OR pi.batch_sno IS NOT NULL);
+        IF @bad IS NOT NULL
+        BEGIN
+            DECLARE @badMsg NVARCHAR(700) = N'No longer waiting for payment (already paid, cancelled, or not approved): ' + @bad + N'. Refresh the list.';
+            THROW 56102, @badMsg, 1;
+        END
+
+        IF @hier IS NOT NULL AND EXISTS (
+            SELECT 1 FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno
+            WHERE NOT EXISTS (SELECT 1 FROM OPENJSON(@hier) WITH (com_sno INT '$.com_sno', div_sno INT '$.div_sno', brn_sno INT '$.brn_sno') h
+                              WHERE h.com_sno = pi.com_sno AND (h.div_sno IS NULL OR h.div_sno = pi.div_sno) AND (h.brn_sno IS NULL OR h.brn_sno = pi.brn_sno)))
+            THROW 56110, 'You do not have access to one or more of the selected payments.', 1;
+
+        IF (SELECT COUNT(*) FROM (SELECT DISTINCT ISNULL(pi.com_sno, -1) com_sno, ISNULL(pi.div_sno, -1) div_sno, ISNULL(pi.brn_sno, -1) brn_sno
+                                  FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno) scopes) > 1
+            THROW 56105, 'A payment file covers one company, division and branch at a time - untick payments from the other scope.', 1;
+
+        DECLARE @total DECIMAL(18,2) = (SELECT SUM(ISNULL(pi.net_paid, pi.amount)) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno);
+        IF @total > @fund + 0.005
+        BEGIN
+            DECLARE @fundMsg NVARCHAR(300) = N'The selected payments total ' + FORMAT(@total, 'N2') + N', more than the fund plan of ' + FORMAT(@fund, 'N2') + N'.';
+            THROW 56104, @fundMsg, 1;
+        END
+
+        -- a bank transfer needs the supplier's bank account
+        DECLARE @nobank NVARCHAR(500) = (
+            SELECT STRING_AGG(ISNULL(k.company_name, '?') + ' (' + pi.payment_no + ')', ', ')
+            FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno
+            LEFT JOIN dbo.kyc_basic_info k ON k.kyc_basic_info_sno = pi.vendor_sno
+            WHERE ISNULL(pi.net_paid, pi.amount) > 0 AND ISNULL(k.pay_via_portal, 'N') <> 'Y' AND UPPER(pi.mode) NOT IN ('CHEQUE', 'CASH', 'DD')
+              AND NOT EXISTS (SELECT 1 FROM dbo.kyc_bank_info x WHERE x.kyc_basic_info_sno = pi.vendor_sno AND ISNULL(x.is_active, 'Y') = 'Y'
+                              AND x.ac_number IS NOT NULL AND NULLIF(LTRIM(RTRIM(x.ifsc)), '') IS NOT NULL));
+        IF @nobank IS NOT NULL
+        BEGIN
+            DECLARE @nobankMsg NVARCHAR(700) = N'Supplier bank details (account number and IFSC) are missing for: ' + @nobank + N'. Update the supplier KYC, or untick them.';
+            THROW 56106, @nobankMsg, 1;
+        END
+
+        -- a supplier paid on their portal is paid there and then recorded (sp_nt_RecordPortalPayment, sql/69) - never put in a run or a file
+        DECLARE @portal NVARCHAR(500) = (
+            SELECT STRING_AGG(ISNULL(k.company_name, '?') + ' (' + pi.payment_no + ')', ', ')
+            FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno
+            JOIN dbo.kyc_basic_info k ON k.kyc_basic_info_sno = pi.vendor_sno
+            WHERE k.pay_via_portal = 'Y' AND ISNULL(pi.net_paid, pi.amount) > 0);
+        IF @portal IS NOT NULL
+        BEGIN
+            DECLARE @portalMsg NVARCHAR(700) = N'Paid on the supplier''s portal, not in a run: ' + @portal + N'. Pay it there and record the transaction, or untick it.';
+            THROW 56115, @portalMsg, 1;
+        END
+
+        -- the sender: which of the company's bank accounts this run is paid from. Needed only when the file will hold a bank
+        -- transfer (a NEFT / RTGS payment to a supplier's account); a run of cheques, cash, portal payments and adjustments has no file.
+        DECLARE @com INT = (SELECT MIN(pi.com_sno) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno),
+                @div INT = (SELECT MIN(pi.div_sno) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno),
+                @brn INT = (SELECT MIN(pi.brn_sno) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno);
+        DECLARE @file_lines INT = (
+            SELECT COUNT(*) FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno
+            LEFT JOIN dbo.kyc_basic_info k ON k.kyc_basic_info_sno = pi.vendor_sno
+            WHERE ISNULL(pi.net_paid, pi.amount) > 0 AND ISNULL(k.pay_via_portal, 'N') <> 'Y' AND UPPER(pi.mode) IN ('NEFT', 'RTGS'));
+        DECLARE @pb INT = NULL, @pb_type VARCHAR(20), @pb_prefix VARCHAR(30), @pb_client VARCHAR(30), @pb_file_code INT,
+                @pb_email VARCHAR(100), @pb_bank NVARCHAR(100), @pb_acno VARCHAR(30);
+        IF @file_lines > 0
+        BEGIN
+            IF @bank_sno IS NOT NULL
+            BEGIN
+                SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master
+                WHERE payment_bank_sno = @bank_sno AND is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn;
+                IF @pb IS NULL THROW 56113, N'The chosen bank account is not available for this company/division/branch (or it was switched off). Choose another.', 1;
+            END
+            ELSE
+            BEGIN
+                SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master
+                WHERE is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn AND is_default = 'Y';
+                IF @pb IS NULL
+                BEGIN
+                    DECLARE @n_banks INT = (SELECT COUNT(*) FROM dbo.payment_bank_master WHERE is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn);
+                    IF @n_banks = 0 THROW 56111, N'No bank account is set up for this company/division/branch. Add one in Masters > Payment Bank, then run again.', 1;
+                    IF @n_banks > 1 THROW 56112, N'This company/division/branch has more than one bank account - choose which one this run is paid from.', 1;
+                    SELECT @pb = payment_bank_sno FROM dbo.payment_bank_master WHERE is_active = 'Y' AND com_sno = @com AND div_sno = @div AND brn_sno = @brn;
+                END
+            END
+            SELECT @pb_type = file_type, @pb_prefix = file_prefix, @pb_client = client_code, @pb_file_code = file_code,
+                   @pb_bank = bank_name, @pb_acno = ac_number
+            FROM dbo.payment_bank_master WHERE payment_bank_sno = @pb;
+            IF @pb_type <> 'BANK_UPLOAD' THROW 56114, N'This bank account has a payment file type the run cannot write yet.', 1;
+        END
+
+        DECLARE @year VARCHAR(4) = CAST(YEAR(GETDATE()) AS VARCHAR(4)), @seq INT;
+        SELECT @seq = ISNULL(MAX(TRY_CAST(RIGHT(batch_no, 6) AS INT)), 0) + 1 FROM dbo.payment_batch WITH (UPDLOCK, HOLDLOCK) WHERE batch_no LIKE 'PB-' + @year + '-%';
+        SET @bno = 'PB-' + @year + '-' + RIGHT('000000' + CAST(@seq AS VARCHAR(6)), 6);
+
+        -- The file name: <prefix>_<client>_<client><DDMM>.<seq>. Reserve its number in the daily register while the run lock
+        -- is held. The unique constraint is a second concurrency guard, independent of payment_batch/file-name parsing.
+        DECLARE @fname VARCHAR(200) = NULL, @fseq INT = NULL, @file_creation_sno BIGINT = NULL;
+        IF @pb IS NOT NULL
+        BEGIN
+            DECLARE @base VARCHAR(120) = @pb_prefix + '_' + @pb_client + '_' + @pb_client
+                                         + RIGHT('0' + CAST(DAY(@vdate) AS VARCHAR(2)), 2) + RIGHT('0' + CAST(MONTH(@vdate) AS VARCHAR(2)), 2);
+            SELECT @fseq = ISNULL(MAX(file_no) + 1, @pb_file_code)
+            FROM dbo.payment_file_creation_no WITH (UPDLOCK, HOLDLOCK)
+            WHERE file_prefix = @pb_prefix AND client_code = @pb_client AND file_date = @vdate;
+            IF @fseq < @pb_file_code SET @fseq = @pb_file_code;
+            SET @fname = @base + '.' + CAST(@fseq AS VARCHAR(10));
+            INSERT INTO dbo.payment_file_creation_no (payment_bank_sno, file_prefix, client_code, file_date, file_no, file_name, created_by)
+            VALUES (@pb, @pb_prefix, @pb_client, @vdate, @fseq, @fname, @by);
+            SET @file_creation_sno = SCOPE_IDENTITY();
+        END
+
+        INSERT INTO dbo.payment_batch (batch_no, batch_date, com_sno, div_sno, brn_sno, fund_plan_amount, total_amount, item_count, status, created_by,
+                                       file_name, file_no, payment_bank_sno, file_type, sender_client_code, sender_alert_email, sender_bank_name, sender_account_no)
+        SELECT @bno, @vdate, MIN(pi.com_sno), MIN(pi.div_sno), MIN(pi.brn_sno), @fund, @total, COUNT(*), 'Generated', @by,
+               @fname, @fseq, @pb, @pb_type, @pb_client, @pb_email, @pb_bank, @pb_acno
+        FROM @sel s JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno;
+        SET @bsno = SCOPE_IDENTITY();
+        IF @file_creation_sno IS NOT NULL
+            UPDATE dbo.payment_file_creation_no SET batch_sno = @bsno WHERE payment_file_creation_sno = @file_creation_sno;
+
+        INSERT INTO dbo.payment_batch_item (batch_sno, payment_sno, line_no, vendor_sno, vendor_name, supp_code, vendor_email, amount, mode, debit_account, channel,
+                                            beneficiary_name, account_no, ifsc, bank_name, branch_name, invoice_nos, supplier_invoice_nos, msme_label, narration,
+                                            gross_amount, tds_amount, advance_amount, note_amount)
+        SELECT @bsno, pi.payment_sno, ROW_NUMBER() OVER (ORDER BY s.line_no), pi.vendor_sno, k.company_name, k.supp_code, k.email,
+               ISNULL(pi.net_paid, pi.amount), pi.mode, pi.bank_account, ch.channel,
+               CASE WHEN ch.channel = 'BANK' THEN bk.ac_holder_name END, CASE WHEN ch.channel = 'BANK' THEN CAST(bk.ac_number AS VARCHAR(40)) END,
+               CASE WHEN ch.channel = 'BANK' THEN bk.ifsc END, CASE WHEN ch.channel = 'BANK' THEN bk.bank_name END, CASE WHEN ch.channel = 'BANK' THEN bk.bank_branch_name END,
+               inv.invoice_nos, inv.supplier_invoice_nos,
+               CASE WHEN ISNULL(k.is_msme_avail, 'N') = 'Y' OR NULLIF(LTRIM(RTRIM(k.msme_type)), '') IS NOT NULL THEN ISNULL(NULLIF(LTRIM(RTRIM(k.msme_type)), ''), 'MSME') END,
+               LEFT(pi.payment_no + ISNULL(' ' + inv.first_supplier_invoice, ''), 60),
+               ISNULL(pi.gross_amount, pi.amount), ISNULL(pi.tds_amount, 0), ISNULL(pi.advance_adjusted, 0), ISNULL(pi.note_adjusted, 0)
+        FROM @sel s
+        JOIN dbo.payment_info pi ON pi.payment_sno = s.payment_sno
+        LEFT JOIN dbo.kyc_basic_info k ON k.kyc_basic_info_sno = pi.vendor_sno
+        OUTER APPLY (SELECT TOP 1 x.ac_holder_name, x.ac_number, x.ifsc, x.bank_name, x.bank_branch_name
+                     FROM dbo.kyc_bank_info x
+                     WHERE x.kyc_basic_info_sno = pi.vendor_sno AND ISNULL(x.is_active, 'Y') = 'Y'
+                       AND x.ac_number IS NOT NULL AND NULLIF(LTRIM(RTRIM(x.ifsc)), '') IS NOT NULL   -- same test as the 56106 guard: the account snapshotted is one the guard accepted
+                     ORDER BY CASE WHEN x.is_primary = 'Y' THEN 0 ELSE 1 END, x.kyc_address_sno DESC) bk
+        CROSS APPLY (SELECT CASE WHEN ISNULL(pi.net_paid, pi.amount) = 0 THEN 'ADJUSTMENT'
+                                 WHEN k.pay_via_portal = 'Y' THEN 'PORTAL'
+                                 WHEN UPPER(pi.mode) IN ('CHEQUE', 'CASH', 'DD') THEN 'MANUAL'
+                                 ELSE 'BANK' END AS channel) ch
+        OUTER APPLY (SELECT STRING_AGG(l.invoice_no, ', ') WITHIN GROUP (ORDER BY l.invoice_sno) AS invoice_nos,
+                            STRING_AGG(NULLIF(LTRIM(RTRIM(l.supplier_invoice_no)), ''), ', ') WITHIN GROUP (ORDER BY l.invoice_sno) AS supplier_invoice_nos,
+                            MIN(NULLIF(LTRIM(RTRIM(l.supplier_invoice_no)), '')) AS first_supplier_invoice
+                     FROM dbo.fn_nt_PaymentLines(pi.payment_sno) l) inv;
+
+        UPDATE pi SET status = 'Processed', batch_sno = @bsno, processed_at = GETDATE(), payment_date = @vdate, modified_by = @by, modified_date = GETDATE()
+        FROM dbo.payment_info pi JOIN @sel s ON s.payment_sno = pi.payment_sno;
+        INSERT INTO dbo.payment_approval_history (payment_sno, action_type, status_by, comment)
+        SELECT s.payment_sno, 'PAID', @by, N'Paid in ' + @bno FROM @sel s;
+
+        -- what each payment paid on each invoice, frozen for the auditor / payment inputter (sql/70): paid before, this payment, balance left
+        INSERT INTO dbo.payment_batch_item_invoice (batch_item_sno, batch_sno, payment_sno, invoice_sno, invoice_no, supplier_invoice_no, invoice_date, invoice_amount, gst_amount,
+                                                    payable_total, paid_before, this_gross, tds_amount, balance_after, awaiting_2b, part_no, kind)
+        SELECT q.batch_item_sno, @bsno, q.payment_sno, q.invoice_sno, q.invoice_no, q.supplier_invoice_no, q.invoice_date, q.invoice_amount, q.gst_amount,
+               q.payable_total, q.paid_before, q.amount, q.tds, q.balance_after,
+               CASE WHEN q.balance_after > 0.01 AND q.on_hold = 1 THEN 1 ELSE 0 END, q.prior_n + 1,
+               CASE WHEN q.balance_after > 0.01 THEN 'PART' WHEN q.prior_n = 0 THEN 'FULL' ELSE 'FINAL' END
+        FROM (
+            SELECT bi.batch_item_sno, bi.payment_sno, l.invoice_sno, l.invoice_no, l.supplier_invoice_no, l.invoice_date, i.invoice_amount,
+                   CASE WHEN i.taxable_value IS NOT NULL AND i.invoice_amount > 0 AND i.taxable_value <= i.invoice_amount THEN i.invoice_amount - i.taxable_value END AS gst_amount,
+                   tot.payable_total, ISNULL(pr.paid_before, 0) AS paid_before, l.amount,
+                   ISNULL(td.tds, 0) AS tds, ISNULL(pr.prior_n, 0) AS prior_n,
+                   CAST(tot.payable_total - ISNULL(pr.paid_before, 0) - l.amount AS DECIMAL(18,2)) AS balance_after,
+                   CASE WHEN EXISTS (SELECT 1 FROM dbo.invoice_allocation_details a3 CROSS APPLY dbo.fn_nt_BillPayable(a3.invoice_alloc_sno) bp
+                                     WHERE a3.invoice_sno = l.invoice_sno AND a3.is_active = 'Y' AND bp.on_hold_2b = 1) THEN 1 ELSE 0 END AS on_hold
+            FROM dbo.payment_batch_item bi
+            CROSS APPLY dbo.fn_nt_PaymentLines(bi.payment_sno) l
+            JOIN dbo.invoice_info i ON i.invoice_sno = l.invoice_sno
+            CROSS APPLY (SELECT SUM(a2.release_amount) AS payable_total FROM dbo.invoice_allocation_details a2 WHERE a2.invoice_sno = l.invoice_sno AND a2.is_active = 'Y') tot
+            OUTER APPLY (SELECT SUM(pad.amount) AS paid_before, COUNT(DISTINCT pad.payment_sno) AS prior_n
+                         FROM dbo.payment_allocation_details pad
+                         JOIN dbo.invoice_allocation_details a4 ON a4.invoice_alloc_sno = pad.invoice_alloc_sno
+                         JOIN dbo.payment_info p2 ON p2.payment_sno = pad.payment_sno AND p2.status = 'Processed' AND p2.payment_sno < bi.payment_sno
+                         WHERE a4.invoice_sno = l.invoice_sno) pr
+            OUTER APPLY (SELECT SUM(d.tds_amount) AS tds FROM dbo.tds_deduction d WHERE d.payment_sno = bi.payment_sno AND d.invoice_sno = l.invoice_sno) td
+            WHERE bi.batch_sno = @bsno
+        ) q;
+
+        -- journals: the same entries the release used to post
+        DECLARE @jl TABLE (head_sno INT, debit DECIMAL(18,2), credit DECIMAL(18,2));
+        DECLARE @p INT, @pn VARCHAR(30), @pv INT, @gross DECIMAL(18,2), @tds DECIMAL(18,2), @adv DECIMAL(18,2), @net DECIMAL(18,2), @dn DECIMAL(18,2), @cn DECIMAL(18,2),
+                @jc INT, @jd INT, @jb INT, @jdp INT, @j INT;
+        DECLARE cur CURSOR LOCAL FAST_FORWARD FOR SELECT payment_sno FROM @sel ORDER BY line_no;
+        OPEN cur; FETCH NEXT FROM cur INTO @p;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SELECT @pn = payment_no, @pv = vendor_sno, @gross = ISNULL(gross_amount, amount), @tds = ISNULL(tds_amount, 0), @adv = ISNULL(advance_adjusted, 0),
+                   @net = ISNULL(net_paid, amount), @jc = com_sno, @jd = div_sno, @jb = brn_sno, @jdp = dept_sno
+            FROM dbo.payment_info WHERE payment_sno = @p;
+            SELECT @dn = ISNULL(SUM(CASE WHEN adj_type = 'DEBIT_NOTE' THEN amount END), 0), @cn = ISNULL(SUM(CASE WHEN adj_type = 'CREDIT_NOTE' THEN amount END), 0)
+            FROM dbo.payment_adjustment WHERE payment_sno = @p;
+
+            INSERT INTO dbo.acct_journal (journal_date, source_type, source_sno, narration, com_sno, div_sno, brn_sno, dept_sno, created_by)
+            VALUES (@vdate, 'PAYMENT', @p, N'Payment ' + @pn, @jc, @jd, @jb, @jdp, @by);
+            SET @j = SCOPE_IDENTITY();
+            UPDATE dbo.acct_journal SET journal_no = 'JV-' + RIGHT('000000' + CAST(@j AS VARCHAR(6)), 6) WHERE journal_sno = @j;
+
+            DELETE FROM @jl;
+            INSERT INTO @jl VALUES (@h_pay, @gross + @cn, 0);
+            IF @tds > 0 INSERT INTO @jl VALUES (@h_tds, 0, @tds);
+            IF @adv > 0 INSERT INTO @jl VALUES (@h_adv, 0, @adv);
+            IF @net > 0 INSERT INTO @jl VALUES (@h_bank, 0, @net);
+            IF @dn > 0  INSERT INTO @jl VALUES (@h_dn, 0, @dn);
+            IF @cn > 0  BEGIN INSERT INTO @jl VALUES (@h_dn, @cn, 0); INSERT INTO @jl VALUES (@h_pay, 0, @cn); END
+            IF (SELECT SUM(debit) - SUM(credit) FROM @jl) <> 0 THROW 56109, 'Payment journal is not balanced.', 1;
+            INSERT INTO dbo.acct_journal_line (journal_sno, head_sno, debit, credit, vendor_sno) SELECT @j, head_sno, debit, credit, @pv FROM @jl;
+            UPDATE dbo.payment_info SET journal_sno = @j WHERE payment_sno = @p;
+
+            FETCH NEXT FROM cur INTO @p;
+        END
+        CLOSE cur; DEALLOCATE cur;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+
+    SELECT b.batch_sno, b.batch_no, b.batch_date, b.com_sno, b.div_sno, b.brn_sno, b.fund_plan_amount, b.total_amount, b.item_count, b.status, b.created_by,
+           CONVERT(VARCHAR(30), b.created_at, 120) AS created_at,
+           b.file_name, b.file_no, b.payment_bank_sno, b.file_type, b.sender_client_code, b.sender_alert_email, b.sender_bank_name, b.sender_account_no
+    FROM dbo.payment_batch b WHERE b.batch_sno = @bsno;
+    SELECT i.batch_item_sno, i.batch_sno, i.payment_sno, p.payment_no, i.line_no, i.vendor_sno, i.vendor_name, i.supp_code, i.vendor_email, i.amount, i.mode, i.debit_account,
+           i.channel, i.beneficiary_name, i.account_no, i.ifsc, i.bank_name, i.branch_name, i.invoice_nos, i.supplier_invoice_nos, i.msme_label, i.narration, i.gross_amount, i.tds_amount, i.advance_amount, i.note_amount,
+           p.com_sno, p.div_sno, p.brn_sno, p.dept_sno
+    FROM dbo.payment_batch_item i JOIN dbo.payment_info p ON p.payment_sno = i.payment_sno
+    WHERE i.batch_sno = @bsno ORDER BY i.line_no;
+
+    SELECT l.batch_item_sno, l.batch_sno, l.payment_sno, l.invoice_sno, l.invoice_no, l.supplier_invoice_no, l.invoice_date, l.invoice_amount, l.gst_amount,
+           l.payable_total, l.paid_before, l.this_gross, l.tds_amount, l.balance_after, l.awaiting_2b, l.part_no, l.kind
+    FROM dbo.payment_batch_item_invoice l WHERE l.batch_sno = @bsno
+    ORDER BY l.batch_item_sno, l.invoice_sno;
+END

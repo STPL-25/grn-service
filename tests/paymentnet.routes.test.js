@@ -7,7 +7,7 @@ import express from "express";
 
 const input = jest.fn();
 const execute = jest.fn();
-const schema = { c: 1, p: 1, n: 1 };                 // what the database says about the sql/68 objects
+const schema = { c: 1, p: 1, n: 1, t: 1 };               // what the database says about the sql/68 objects
 const query = jest.fn(async () => ({ recordset: [schema] }));
 const request = { input, execute, query };
 input.mockReturnValue(request);
@@ -17,6 +17,10 @@ const createInAppNotification = jest.fn(async () => ({ sent: true }));
 jest.unstable_mockModule("../src/config/db.js", () => ({
   initializeDatabase: async () => ({ request: () => request }),
 }));
+jest.unstable_mockModule("../src/paymentnet/bankFileLayout.js", async () => {
+  const { STD_LAYOUT } = await import("./fixtures/standardLayout.js");
+  return { loadBankFileLayout: async () => STD_LAYOUT };
+});
 jest.unstable_mockModule("../src/utils/socketBroadcast.js", () => ({ broadcast }));
 jest.unstable_mockModule("../src/utils/notifyClient.js", () => ({ createInAppNotification }));
 // the org scope of the caller: a user who may see company 1 only
@@ -503,6 +507,25 @@ describe("POST /run/proceed", () => {
     expect((await fetch(`${base}/run/batches/5/verification`)).status).toBe(404);
   });
 
+  it("payment history: asks for up to ?limit= runs (default 30, at most 1000) and lists the suppliers / payments of each run", async () => {
+    execute.mockResolvedValue({ recordsets: [[{ batch_sno: 5, batch_no: "PB-5" }, { batch_sno: 6, batch_no: "PB-6" }]], recordset: [] });
+    query.mockResolvedValueOnce({ recordset: [{ batch_sno: 5, vendor_names: "NEO\u001fSILVER\u001fNEO", supp_codes: "N1\u001f\u001fN1", payment_nos: "PAY-1\u001fPAY-2\u001fPAY-3" }] });
+    const res = await getJson("/run/batches?limit=500");
+    expect(sentTo("sp_nt_GetPaymentBatches")).toEqual({ hierarchy, limit: 500 });
+    expect(res.data).toEqual([
+      { batch_sno: 5, batch_no: "PB-5", vendor_names: ["NEO", "SILVER"], supp_codes: ["N1"], payment_nos: ["PAY-1", "PAY-2", "PAY-3"] },
+      { batch_sno: 6, batch_no: "PB-6", vendor_names: [], supp_codes: [], payment_nos: [] },
+    ]);
+    execute.mockClear(); input.mockClear();
+    await getJson("/run/batches?limit=99999");
+    expect(sentTo("sp_nt_GetPaymentBatches").limit).toBe(1000);
+    execute.mockClear(); input.mockClear();
+    query.mockRejectedValueOnce(new Error("no table"));
+    const plain = await getJson("/run/batches?limit=abc");
+    expect(sentTo("sp_nt_GetPaymentBatches").limit).toBe(30);
+    expect(plain.data[0]).toMatchObject({ batch_no: "PB-5", vendor_names: [] });
+  });
+
   it("a run outside the caller's scope is 404", async () => {
     execute.mockResolvedValue({ recordsets: [[], []], recordset: [] });
     expect((await fetch(`${base}/run/batches/9`)).status).toBe(404);
@@ -532,7 +555,10 @@ describe("portal payments and TDS records", () => {
   it("lists recorded portal payments and TDS records under the caller's scope", async () => {
     execute.mockResolvedValue({ recordset: [{ x: 1 }], recordsets: [[{ x: 1 }]] });
     expect((await getJson("/run/portal-payments")).data).toEqual([{ x: 1 }]);
-    expect(sentTo("sp_nt_GetPortalPayments")).toEqual({ hierarchy });
+    expect(sentTo("sp_nt_GetPortalPayments")).toEqual({ hierarchy, limit: 50 });
+    execute.mockClear(); input.mockClear();
+    await getJson("/run/portal-payments?limit=5000");   // Payment history asks for more, capped at 1000
+    expect(sentTo("sp_nt_GetPortalPayments")).toEqual({ hierarchy, limit: 1000 });
     await getJson("/tds-records?vendor_sno=122");
     expect(sentTo("sp_nt_GetTdsRecords")).toEqual({ hierarchy, vendor_sno: 122 });
   });
@@ -551,5 +577,228 @@ describe("GET /run/senders", () => {
     execute.mockResolvedValue({ recordset: [], recordsets: [[]] });
     await getJson("/run/senders?com_sno=abc&div_sno=x&brn_sno=0");
     expect(sentTo("sp_nt_GetPaymentSenders")).toEqual({ hierarchy });
+  });
+});
+
+describe("statutory payments (/statutory)", () => {
+  const batchRow = { batch_sno: 9, batch_no: "SB-2026-000001", batch_date: "2026-10-28", kind: "TDS", file_type: "BANK_UPLOAD", file_name: "SPACETEX_SPA311_SPA3112810.1000", sender_account_no: "123456785678", total_amount: 9520 };
+  const itemRow = { line_no: 1, amount: 9520, mode: "NEFT", payee_name: "Income Tax Department", account_no: "000111222", ifsc: "SBIN0000001", bank_name: "SBI", branch_name: "Main", reference_no: "CHEN12345A", head_name: "TDS u/s 194LA", period_label: "Oct 2026" };
+
+  it("lists the register of one kind under the caller's org scope, with the GST held until 2B", async () => {
+    execute.mockResolvedValue({ recordset: [], recordsets: [[{ stat_sno: 1 }], [{ invoice_no: "INV-1", gst_amount: 18 }]] });
+    const res = await getJson("/statutory/payables?kind=gst&status=Open");
+    expect(sentTo("sp_nt_GetStatutoryPayables")).toEqual({ kind: "GST", status: "Open", hierarchy });
+    expect(res.data).toEqual({ payables: [{ stat_sno: 1 }], gstHeld: [{ invoice_no: "INV-1", gst_amount: 18 }] });
+  });
+
+  it("an unknown kind or status is simply not filtered on", async () => {
+    execute.mockResolvedValue({ recordset: [], recordsets: [[], []] });
+    await getJson("/statutory/payables?kind=BOGUS&status=Whatever");
+    expect(sentTo("sp_nt_GetStatutoryPayables")).toEqual({ hierarchy });
+  });
+
+  it("keys in an amount as the caller, and refuses a missing kind before touching the database", async () => {
+    execute.mockResolvedValue({ recordset: [{ stat_sno: 5 }], recordsets: [[{ stat_sno: 5 }]] });
+    const ok = await postJson("/statutory/payables", { kind: "OTHER", head_name: "Provident Fund", amount: 1000, com_sno: "1", due_date: "2026-11-15", payee_sno: "2" });
+    expect(ok.data).toEqual({ stat_sno: 5 });
+    expect(sentTo("sp_nt_AddStatutoryPayable")).toMatchObject({ kind: "OTHER", head_name: "Provident Fund", amount: 1000, com_sno: 1, payee_sno: 2, due_date: "2026-11-15", created_by: "TEST001", hierarchy });
+    execute.mockClear();
+    const bad = await postJson("/statutory/payables", { head_name: "x", amount: 1 });
+    expect(bad.success).toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("saves a payee with its default / active flags", async () => {
+    execute.mockResolvedValue({ recordset: [{ payee_sno: 4 }], recordsets: [[{ payee_sno: 4 }]] });
+    await postJson("/statutory/payees", { kind: "TDS", payee_name: "ITD", ac_number: "1", ifsc: "SBIN0000001", is_default: true, is_active: false });
+    expect(sentTo("sp_nt_UpsertStatutoryPayee")).toMatchObject({ kind: "TDS", is_default: "Y", is_active: "N", modified_by: "TEST001" });
+  });
+
+  it("a bank payee sends its bank details and no portal; an online payee sends its portal and no bank details (sql/82)", async () => {
+    execute.mockResolvedValue({ recordset: [{ payee_sno: 4 }], recordsets: [[{ payee_sno: 4 }]] });
+    await postJson("/statutory/payees", { kind: "TDS", payee_name: "ITD", ac_number: "1", ifsc: "SBIN0000001", pay_mode: "RTGS", payment_portal_url: "https://x.gov.in", is_default: true });
+    const bank = sentTo("sp_nt_UpsertStatutoryPayee");
+    expect(bank).toMatchObject({ pay_via_portal: "N", ac_number: "1", ifsc: "SBIN0000001", pay_mode: "RTGS" });
+    expect(bank).not.toHaveProperty("payment_portal_url");
+    execute.mockClear(); input.mockClear();
+    await postJson("/statutory/payees", {
+      kind: "gst", payee_name: "GST dept", pay_via_portal: true, payment_portal_name: "GST portal", payment_portal_url: "https://payment.gst.gov.in",
+      payment_instructions: "PMT-06 challan", ac_number: "999", ifsc: "SBIN0000001", reference_no: "33ABCDE1234F1Z5",
+    });
+    const online = sentTo("sp_nt_UpsertStatutoryPayee");
+    expect(online).toMatchObject({ kind: "GST", pay_via_portal: "Y", payment_portal_name: "GST portal", payment_portal_url: "https://payment.gst.gov.in",
+      payment_instructions: "PMT-06 challan", reference_no: "33ABCDE1234F1Z5", modified_by: "TEST001" });
+    expect(online).not.toHaveProperty("ac_number");
+    expect(online).not.toHaveProperty("ifsc");
+  });
+
+  it("records an online payment of the ticked amounts as the caller, under the caller's scope", async () => {
+    const online = { batch_sno: 12, batch_no: "SO-2026-000001", kind: "TDS", pay_channel: "ONLINE", txn_mode: "Net Banking", txn_id: "CIN-1", sender_account_no: null, total_amount: 7392 };
+    execute.mockResolvedValue({ recordset: [online], recordsets: [[online], [{ stat_sno: 2 }, { stat_sno: 3 }]] });
+    const res = await postJson("/statutory/online-payment", { stat_snos: ["2", 3], txn_mode: "net banking", txn_id: " CIN-1 ", txn_date: "2026-11-02", remarks: "  Oct TDS " });
+    expect(res.success).toBe(true);
+    expect(sentTo("sp_nt_RecordStatutoryOnlinePayment")).toEqual({
+      stat_snos: [2, 3], txn_mode: "Net Banking", txn_id: "CIN-1", txn_date: "2026-11-02", remarks: "Oct TDS", recorded_by: "TEST001", hierarchy,
+    });
+    expect(res.data.batch).toMatchObject({ batch_no: "SO-2026-000001", sender_ac_last4: null });
+    expect(res.data.items).toHaveLength(2);
+  });
+
+  it("an online payment needs amounts, a known mode and a challan number before touching the database", async () => {
+    expect((await postJson("/statutory/online-payment", { stat_snos: [], txn_mode: "UPI", txn_id: "A" })).error).toMatch(/at least one/);
+    expect((await postJson("/statutory/online-payment", { stat_snos: [1], txn_mode: "Wallet", txn_id: "A" })).error).toMatch(/Choose how it was paid/);
+    expect((await postJson("/statutory/online-payment", { stat_snos: [1], txn_mode: "UPI", txn_id: "  " })).error).toMatch(/challan/);
+    expect(execute).not.toHaveBeenCalled();
+    execute.mockRejectedValue(new Error("Income Tax e-Pay is paid by bank account - pay those amounts with \"Pay & generate file\"."));
+    expect((await postJson("/statutory/online-payment", { stat_snos: [1], txn_mode: "UPI", txn_id: "A1" })).error).toMatch(/paid by bank account/);
+  });
+
+  it("an online payment has no bank file to download", async () => {
+    execute.mockResolvedValue({ recordset: [], recordsets: [[{ batch_sno: 12, batch_no: "SO-2026-000001", pay_channel: "ONLINE", txn_mode: "UPI", txn_id: "U1" }], []] });
+    const res = await fetch(`${base}/statutory/runs/12/file`);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("SO-2026-000001 was paid online (UPI U1) - there is no bank file for it.");
+  });
+
+  it("a run pays the ticked amounts, writes the bank file, stores it, and never sends the sender's full account out", async () => {
+    execute.mockImplementation(async (proc) => {
+      if (proc === "sp_nt_CreateStatutoryBatch") return { recordset: [batchRow], recordsets: [[batchRow], [itemRow]] };
+      return { recordset: [], recordsets: [[]] };
+    });
+    const res = await postJson("/statutory/run", { stat_snos: [3, 4], payment_date: "2026-10-28", payment_bank_sno: "2" });
+    expect(res.success).toBe(true);
+    expect(sentTo("sp_nt_CreateStatutoryBatch")).toEqual({ stat_snos: [3, 4], payment_date: "2026-10-28", payment_bank_sno: 2, created_by: "TEST001", hierarchy });
+    expect(res.data.file.file_name).toBe("SPACETEX_SPA311_SPA3112810.1000");
+    expect(res.data.file.line_count).toBe(1);
+    expect(res.data.file.content.split(",")).toHaveLength(28);
+    expect(res.data.batch.sender_ac_last4).toBe("5678");
+    expect(JSON.stringify(res.data)).not.toContain("123456785678");
+    expect(sentTo("sp_nt_SetStatutoryBatchFile")).toMatchObject({ batch_sno: 9, file_name: "SPACETEX_SPA311_SPA3112810.1000" });
+  });
+
+  it("needs at least one amount, and shows the SQL reason when the run is refused", async () => {
+    expect((await postJson("/statutory/run", { stat_snos: [] })).error).toMatch(/at least one/);
+    execute.mockRejectedValue(new Error("A statutory file holds one kind at a time (TDS, GST or other) - pay each from its own tab."));
+    expect((await postJson("/statutory/run", { stat_snos: [1, 2] })).error).toMatch(/one kind at a time/);
+  });
+
+  it("if the file cannot be written after the amounts were paid, says so plainly", async () => {
+    execute.mockImplementation(async (proc) => (proc === "sp_nt_CreateStatutoryBatch"
+      ? { recordset: [{ ...batchRow, file_name: null }], recordsets: [[{ ...batchRow, file_name: null }], [itemRow]] }
+      : { recordset: [], recordsets: [[]] }));
+    const res = await postJson("/statutory/run", { stat_snos: [3] });
+    expect(res.error).toMatch(/SB-2026-000001 was created, but its file could not be written/);
+  });
+
+  it("gives a past run's stored file as is, and writes it again from the lines when it was never stored", async () => {
+    execute.mockResolvedValueOnce({ recordset: [], recordsets: [[{ ...batchRow, file_content: "stored" }], []] });
+    expect((await getJson("/statutory/runs/9/file")).data).toMatchObject({ file_name: "SPACETEX_SPA311_SPA3112810.1000", content: "stored" });
+    execute.mockReset();
+    execute.mockImplementation(async (proc) => (proc === "sp_nt_GetStatutoryBatches"
+      ? { recordset: [], recordsets: [[{ ...batchRow, file_content: null }], [itemRow]] }
+      : { recordset: [], recordsets: [[]] }));
+    const again = await getJson("/statutory/runs/9/file");
+    expect(again.data.content.split(",")).toHaveLength(28);
+    expect(sentTo("sp_nt_SetStatutoryBatchFile")).toMatchObject({ batch_sno: 9 });
+  });
+
+  it("a run outside the caller's scope is 404", async () => {
+    execute.mockResolvedValue({ recordset: [], recordsets: [[], []] });
+    const res = await fetch(`${base}/statutory/runs/9/file`);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("reverse file (sql/83)", () => {
+  const runRow = { batch_sno: 21, batch_no: "PB-2026-000021", file_name: "SPACETEX_SPA311_SPA3110311.100", file_type: "BANK_UPLOAD", com_sno: 1 };
+  const runItem = (o) => ({ channel: "BANK", mode: "NEFT", bank_status: null, utr_no: null, payment_status: "Processed", ...o });
+  const runItems = [
+    runItem({ batch_item_sno: 1, line_no: 1, payment_sno: 31, payment_no: "PAY-2026-000031", vendor_sno: 122, vendor_name: "Aravali", amount: 48300, account_no: "1205012345" }),
+    runItem({ batch_item_sno: 2, line_no: 2, payment_sno: 34, payment_no: "PAY-2026-000034", vendor_sno: 150, vendor_name: "Bluepeak", amount: 61500, account_no: "50100223344556" }),
+    runItem({ batch_item_sno: 3, line_no: 3, payment_sno: 35, payment_no: "PAY-2026-000035", vendor_sno: 160, vendor_name: "Cheque Co", amount: 700, mode: "Cheque", channel: "MANUAL" }),
+  ];
+  const FILE = [
+    "Customer Reference No,Status,Amount,UTR No,Reason Code,Reason",
+    "122-PAY2026000031,Success,48300.00,HDFCN26307004512,,",
+    "150-PAY2026000034,Rejected,61500.00,,AC01,Invalid account",
+    "999-PAY2026000099,Paid,1,U9,,",
+  ].join("\n");
+  const applied = [
+    { batch_item_sno: 1, payment_sno: 31, payment_no: "PAY-2026-000031", vendor_name: "Aravali", amount: 48300, result: "PAID", new_status: "PAID", payment_status: "Processed", created_by: "TEST001", com_sno: 1, div_sno: 2, brn_sno: 3, dept_sno: 4 },
+    { batch_item_sno: 2, payment_sno: 34, payment_no: "PAY-2026-000034", vendor_name: "Bluepeak", amount: 61500, result: "FAILED", new_status: "REJECTED", bank_reason: "Invalid account", payment_status: "Approved", created_by: "KTM1006", com_sno: 1, div_sno: 2, brn_sno: 3, dept_sno: 4 },
+  ];
+  beforeEach(() => {
+    execute.mockImplementation(async (proc) => {
+      if (proc === "sp_nt_GetPaymentBatches") return { recordset: [runRow], recordsets: [[runRow], runItems, [], [{ reverse_file_sno: 7 }]] };
+      if (proc === "sp_nt_ApplyPaymentReverseFile") return { recordset: [], recordsets: [[{ reverse_file_sno: 8, paid_count: 1, failed_count: 1 }], applied] };
+      return { recordset: [], recordsets: [[]] };
+    });
+  });
+
+  it("the run detail gives each file transfer the reference the bank quotes back, and the run's reverse files", async () => {
+    const res = await getJson("/run/batches/21");
+    expect(res.data.items.map((i) => i.reference)).toEqual(["122-PAY2026000031", "150-PAY2026000034", null]);
+    expect(res.data.reverse_files).toEqual([{ reverse_file_sno: 7 }]);
+  });
+
+  it("preview says what each line would do and changes nothing", async () => {
+    const res = await postJson("/run/batches/21/reverse-file/preview", { file_name: "rev.csv", content: FILE });
+    expect(res.success).toBe(true);
+    expect(res.data.summary).toMatchObject({ lines: 3, matched: 2, problems: 1, paid: 1, failed: 1 });
+    expect(res.data.lines.map((l) => l.action ?? l.problem)).toEqual(["MARK_PAID", "RETURN_TO_RUN", expect.stringMatching(/No transfer of PB-2026-000021/)]);
+    expect(sentTo("sp_nt_ApplyPaymentReverseFile")).toBeNull();
+    expect(sentTo("sp_nt_GetPaymentBatches")).toMatchObject({ batch_sno: 21, hierarchy });
+  });
+
+  it("applies only the matched lines, refreshes the screens and tells the payment's maker it was not paid", async () => {
+    const res = await postJson("/run/batches/21/reverse-file", { file_name: "rev.csv", content: FILE });
+    expect(res.success).toBe(true);
+    const sent = sentTo("sp_nt_ApplyPaymentReverseFile");
+    expect(sent).toMatchObject({ batch_sno: 21, uploaded_by: "TEST001", file_name: "rev.csv", file_content: FILE, unmatched_count: 1, hierarchy });
+    expect(sent.lines).toEqual([
+      expect.objectContaining({ batch_item_sno: 1, status: "PAID", amount: 48300, utr_no: "HDFCN26307004512" }),
+      expect.objectContaining({ batch_item_sno: 2, status: "REJECTED", amount: 61500, reason_code: "AC01", reason: "Invalid account" }),
+    ]);
+    expect(res.data.problems).toHaveLength(1);
+    expect(broadcast).toHaveBeenCalledTimes(2);
+    expect(broadcast.mock.calls[1][2]).toMatchObject({ payment_sno: 34, status: "Approved", bank_status: "REJECTED" });
+    expect(createInAppNotification).toHaveBeenCalledTimes(1);
+    expect(createInAppNotification.mock.calls[0][0]).toMatchObject({ ecno: "KTM1006", title: "Payment not paid by the bank" });
+    expect(createInAppNotification.mock.calls[0][0].message).toMatch(/rejected by the bank: Invalid account\. It is back in Payment Run/);
+  });
+
+  it("refuses an empty or unreadable file, a file nothing matches, and a run with no bank transfer", async () => {
+    expect((await postJson("/run/batches/21/reverse-file", { content: "" })).error).toMatch(/Choose the reverse file/);
+    expect((await postJson("/run/batches/21/reverse-file", { content: "Amount\n1" })).error).toMatch(/reference column/);
+    expect((await postJson("/run/batches/21/reverse-file", { content: "Reference,Status\nX-1,Paid" })).error).toMatch(/nothing was changed/);
+    expect(sentTo("sp_nt_ApplyPaymentReverseFile")).toBeNull();
+    execute.mockImplementation(async () => ({ recordset: [], recordsets: [[runRow], [runItems[2]], []] }));
+    expect((await postJson("/run/batches/21/reverse-file/preview", { content: FILE })).error).toMatch(/no NEFT \/ RTGS transfer/);
+  });
+
+  it("changes how a payment the bank did not pay is paid", async () => {
+    execute.mockResolvedValue({ recordset: [{ payment_sno: 34, payment_no: "PAY-2026-000034", mode: "RTGS", old_mode: "NEFT", status: "Approved", com_sno: 1 }], recordsets: [[]] });
+    const res = await postJson("/run/change-mode", { payment_sno: 34, mode: "rtgs", reason: "  above 2 lakh  " });
+    expect(res.data).toMatchObject({ mode: "RTGS", old_mode: "NEFT" });
+    expect(sentTo("sp_nt_ChangeFailedPaymentMode")).toEqual({ payment_sno: 34, mode: "RTGS", reason: "above 2 lakh", changed_by: "TEST001", hierarchy });
+    expect(broadcast.mock.calls[0][2]).toMatchObject({ payment_sno: 34, mode: "RTGS" });
+    expect((await postJson("/run/change-mode", { payment_sno: 34, mode: "UPI" })).error).toMatch(/Choose NEFT, RTGS/);
+    expect((await postJson("/run/change-mode", { mode: "NEFT" })).error).toMatch(/payment_sno is required/);
+  });
+
+  it("the Payment Run list carries the bank's reason on a payment it did not pay", async () => {
+    execute.mockImplementation(async (proc) => {
+      if (proc === "sp_nt_GetPaymentEntries") {
+        return { recordset: [], recordsets: [[{ payment_sno: 34, status: "Approved", batch_sno: null }, { payment_sno: 40, status: "Approved", batch_sno: null }], [], []] };
+      }
+      if (proc === "sp_nt_GetPaymentBankFailures") return { recordset: [{ payment_sno: 34, bank_status: "REJECTED", bank_reason: "Invalid account", batch_no: "PB-2026-000021" }], recordsets: [[]] };
+      return { recordset: [], recordsets: [[]] };
+    });
+    const res = await getJson("/entries?view=run");
+    // (sentTo pairs calls by position, and this route also runs a procedure without parameters - so look for the payload itself)
+    expect(input.mock.calls.map((c) => JSON.parse(c[2]))).toContainEqual({ payment_snos: [34, 40] });
+    expect(execute.mock.calls.map(([p]) => p)).toContain("sp_nt_GetPaymentBankFailures");
+    expect(res.data.entries[0].bank_failure).toMatchObject({ bank_status: "REJECTED", bank_reason: "Invalid account" });
+    expect(res.data.entries[1].bank_failure).toBeUndefined();
   });
 });

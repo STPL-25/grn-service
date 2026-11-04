@@ -3,6 +3,7 @@ import express from "express";
 import multer from "multer";
 import Gstr2bRepository from "./gstr2b.repository.js";
 import { parseGstr2bWorkbook } from "./gstr2b.parser.js";
+import { releaseUnpaidGst } from "../paymentnet/paymentnet.routes.js";
 
 const repo = new Gstr2bRepository();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -33,7 +34,9 @@ Gstr2bRouter.post("/upload", upload.single("file"), wrap(async (req) => {
     uploaded_by: userOf(req)?.ecno,
     rows,
   });
-  return { summary, sheets };
+  // GST that was left unpaid because an invoice was not in 2B yet moves to Payment Run now that 2B may have it (sql/75)
+  const released_gst = await releaseUnpaidGst({ by: userOf(req)?.ecno });
+  return { summary, sheets, released_gst };
 }));
 
 Gstr2bRouter.get("/uploads", wrap(() => repo.listUploads(), 500));
@@ -48,7 +51,14 @@ Gstr2bRouter.post("/rows/:rowSno/confirm", wrap(async (req) => {
   const [r] = await repo.confirmSupplier({
     row_sno: Number(req.params.rowSno), vendor_sno: Number(req.body.vendor_sno), confirmed_by: userOf(req)?.ecno,
   });
-  return r;
+  const released_gst = await releaseUnpaidGst({ by: userOf(req)?.ecno });
+  return released_gst.length ? { ...r, released_gst } : r;
+}));
+// fix a typo in a 2B row that did not match and re-run the match for it
+Gstr2bRouter.put("/rows/:rowSno", wrap(async (req) => {
+  const [r] = await repo.editRow({ ...req.body, row_sno: Number(req.params.rowSno), by: userOf(req)?.ecno });
+  const released_gst = await releaseUnpaidGst({ by: userOf(req)?.ecno });
+  return released_gst.length ? { ...r, released_gst } : r;
 }));
 Gstr2bRouter.post("/rows/:rowSno/skip", wrap(async (req) => {
   const [r] = await repo.skipRow({ row_sno: Number(req.params.rowSno), skipped_by: userOf(req)?.ecno });
@@ -59,7 +69,8 @@ Gstr2bRouter.post("/invoices/:id/hold-override", wrap(async (req) => {
   const [r] = await repo.setHoldOverride({
     invoice_sno: Number(req.params.id), override: req.body.override, reason: req.body.reason, by: userOf(req)?.ecno,
   });
-  return r;
+  const released_gst = await releaseUnpaidGst({ by: userOf(req)?.ecno });
+  return released_gst.length ? { ...r, released_gst } : r;
 }));
 
 export default Gstr2bRouter;

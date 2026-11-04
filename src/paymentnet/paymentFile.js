@@ -1,22 +1,14 @@
 // paymentFile.js - the bank payment file of a Payment Run (sql/68, sql/70): the file the company uploads to its bank to pay suppliers by NEFT / RTGS.
 //
-// File type BANK_UPLOAD - the layout the bank takes: one line per transfer, 28 positions separated by commas, no header, no quotes, LF
-// between lines (none after the last). Positions that are not used stay empty:
+// The LAYOUT of the file is not here: it is the Bank File Format of the payment bank account the run is paid from (Masters > Finance >
+// Bank File Format + Bank File Format Columns, backend-stpl sql/149), rendered by bankFileFormat.js. This file works out the VALUES a
+// column can pick from (valuesOf) and decides which payments go in. A run whose account has no format is refused - there is no
+// built-in layout to fall back on.
 //
-//    1  transfer type   N = NEFT, R = RTGS (from the payment's mode)
-//    3  receiver's account number         }
-//    4  amount (2 decimals) = what the bank sends, i.e. after TDS / advance / notes }  receiver: the supplier KYC, copied onto the run's lines when the run was made
-//    5  receiver's name (first 20 letters)}
-//   14  reference  <supplier id>-<payment no without - or spaces>, at most 20 characters
-//   15  payment details 1: the supplier's invoice number(s)                              }  free-text "payment details" the bank keeps with the
-//   16  payment details 2: FULL, or PART / FINAL with this payment's share of the invoice }  transfer and shows to the checker (auditor / payment
-//   17  payment details 3: what was taken off - TDS, advance, debit / credit note        }  inputter) on its own screen, at most 30 characters each
-//   23  payment date dd/mm/yyyy (the run's payment date)
-//   25  receiver's IFSC  26  receiver's bank  27  receiver's branch      (supplier KYC)
-//
-// Position 28 (the receiver's e-mail in the bank layout) is left empty: the sender's alert e-mail used to go there and does not any more.
-// The checker approves the file in the BANK's application, not here, so positions 15-17 carry what they need to tell one transfer from
-// the next and to see that a part payment is a part payment. buildVerificationSheet() gives the same facts as a sheet to check against.
+// What DETAIL_1-3 carry: 1 the supplier's invoice number(s), 2 FULL, or PART / FINAL with this payment's share of the invoice, 3 what was
+// taken off - TDS, advance, debit / credit note (at most 30 characters each). The checker approves the file in the BANK's application,
+// not here, so these tell one transfer from the next and show that a part payment is a part payment. buildVerificationSheet() gives
+// the same facts as a sheet to check against.
 //
 // The file NAME (<prefix>_<client code>_<client code><DDMM>.<seq>) is made by sp_nt_CreatePaymentBatch under the run's lock and
 // arrives here as batch.file_name.
@@ -25,7 +17,9 @@
 // suppliers paid on their portal (PORTAL), payments the advances and notes settle entirely (ADJUSTMENT) and other bank modes
 // such as UPI stay out - the bank would reject them in an upload - and are returned in `skipped` so the screen can list them.
 //
-// A value that holds a comma or a line break would shift every position after it, so those are turned into spaces.
+// A value that holds the separator or a line break would shift every field after it, so those are turned into spaces (bankFileFormat.js).
+
+import { renderFile } from "./bankFileFormat.js";
 
 export const FILE_TYPES = { BANK_UPLOAD: "BANK_UPLOAD" };
 export const POSITION_COUNT = 28;
@@ -119,21 +113,58 @@ const SKIP_REASON = {
   ADJUSTMENT: "Nothing to pay out - advances / notes settle it",
 };
 
-/** The 28 positions of one transfer. */
-function lineOf(item, batch, lines) {
+// ── OLD built-in layout (commented out: the file is now written from the Bank File Format master, see renderFile) ──────────────
+// Kept for reference. It wrote 28 comma separated positions:
+//   1 transfer type (N/R)  3 account no  4 amount  5 name (first 20)  14 reference  15-17 payment details 1-3
+//   23 payment date dd/mm/yyyy  25 IFSC  26 bank  27 branch  (28 left empty)
+//
+// /** The 28 positions of one transfer. */
+// function lineOf(item, batch, lines) {
+//   const mine = linesOf(item, lines);
+//   const f = new Array(POSITION_COUNT).fill("");
+//   f[0] = TRANSFER_TYPE[String(item.mode ?? "").toUpperCase()];
+//   f[2] = cell(item.account_no);
+//   f[3] = money(item.amount);
+//   f[4] = cell(item.beneficiary_name || item.vendor_name).slice(0, NAME_MAX).trimEnd();
+//   f[13] = referenceOf(item);
+//   [f[14], f[15], f[16]] = [invoiceText(item, mine), kindText(mine), deductionText(item)];
+//   f[22] = ddmmyyyy(batch.batch_date);
+//   f[24] = cell(item.ifsc).toUpperCase();
+//   f[25] = cell(item.bank_name);
+//   f[26] = cell(item.branch_name);
+//   return f.join(",");
+// }
+//
+// and in buildPaymentFile:
+//   content: inLines.map((i) => lineOf(i, batch, lines)).join("\n"),
+
+/**
+ * What the Bank File Format masters can pick from for one transfer (bankFileFormat.js SOURCE_FIELDS), same values the built-in
+ * layout puts in its positions. `layoutDef.sender` = the payment bank account's { ac_holder_name, ifsc }.
+ */
+function valuesOf(item, batch, lines, serial, layoutDef) {
   const mine = linesOf(item, lines);
-  const f = new Array(POSITION_COUNT).fill("");
-  f[0] = TRANSFER_TYPE[String(item.mode ?? "").toUpperCase()];
-  f[2] = cell(item.account_no);
-  f[3] = money(item.amount);
-  f[4] = cell(item.beneficiary_name || item.vendor_name).slice(0, NAME_MAX).trimEnd();
-  f[13] = referenceOf(item);
-  [f[14], f[15], f[16]] = [invoiceText(item, mine), kindText(mine), deductionText(item)];
-  f[22] = ddmmyyyy(batch.batch_date);
-  f[24] = cell(item.ifsc).toUpperCase();
-  f[25] = cell(item.bank_name);
-  f[26] = cell(item.branch_name);
-  return f.join(",");
+  const sender = layoutDef?.sender ?? {};
+  return {
+    TRANSFER_TYPE: TRANSFER_TYPE[String(item.mode ?? "").toUpperCase()] ?? "",
+    MODE: String(item.mode ?? "").toUpperCase(),
+    ACCOUNT_NO: cell(item.account_no),
+    AMOUNT: money(item.amount),
+    BENEFICIARY_NAME: cell(item.beneficiary_name || item.vendor_name),
+    REFERENCE: referenceOf(item),
+    PAYMENT_NO: cell(item.payment_no),
+    SUPPLIER_CODE: cell(item.vendor_sno),
+    DETAIL_1: invoiceText(item, mine), DETAIL_2: kindText(mine), DETAIL_3: deductionText(item),
+    IFSC: cell(item.ifsc).toUpperCase(), BANK_NAME: cell(item.bank_name), BRANCH_NAME: cell(item.branch_name),
+    SERIAL_NO: String(serial),
+    SENDER_ACCOUNT_NO: cell(batch.sender_account_no), SENDER_NAME: cell(sender.ac_holder_name), SENDER_IFSC: cell(sender.ifsc).toUpperCase(),
+    SENDER_BANK_NAME: cell(batch.sender_bank_name), SENDER_CLIENT_CODE: cell(batch.sender_client_code), SENDER_EMAIL: cell(batch.sender_alert_email),
+  };
+}
+
+/** The file is written only from a Bank File Format master (the payment bank account's), never from a layout in code. */
+function requireLayout(layoutDef, batch) {
+  if (!layoutDef?.format) throw new Error(`Run ${batch.batch_no} has no Bank File Format - choose one on the Payment Bank account (Masters > Finance) and try again.`);
 }
 
 const inFile = (i) => i.channel === "BANK" && Object.hasOwn(TRANSFER_TYPE, String(i.mode ?? "").toUpperCase());
@@ -145,7 +176,7 @@ const inFile = (i) => i.channel === "BANK" && Object.hasOwn(TRANSFER_TYPE, Strin
  * @returns { fileName, mimeType, content, lineCount, totalAmount, skipped: [{ payment_no, vendor_name, amount, channel, reason }] }
  *          A run with nothing to upload (no bank line, so no sender and no file type) gives an empty file: fileName '', lineCount 0.
  */
-export function buildPaymentFile(batch, items, lines = []) {
+export function buildPaymentFile(batch, items, lines = [], layoutDef) {
   const inLines = items.filter(inFile);
   const skipped = items.filter((i) => !inFile(i)).map((i) => ({
     payment_no: i.payment_no, vendor_name: i.vendor_name, amount: Number(i.amount), channel: i.channel,
@@ -157,12 +188,72 @@ export function buildPaymentFile(batch, items, lines = []) {
   if (batch.file_type !== FILE_TYPES.BANK_UPLOAD) throw new Error(`Cannot write a payment file of type ${batch.file_type ?? "(none)"}.`);
   if (!batch.file_name) throw new Error(`Payment run ${batch.batch_no} has no file name - was a bank account chosen for it?`);
 
+  requireLayout(layoutDef, batch);
+  const content = renderFile(layoutDef.format, layoutDef.columns, inLines.map((i, k) => ({ values: valuesOf(i, batch, lines, k + 1, layoutDef), paymentDate: batch.batch_date })));
   return {
     ...base,
     fileName: batch.file_name,
-    content: inLines.map((i) => lineOf(i, batch, lines)).join("\n"),
+    content,
     lineCount: inLines.length,
     totalAmount: Math.round(inLines.reduce((s, i) => s + Number(i.amount), 0) * 100) / 100,
+  };
+}
+
+// ── statutory file (sql/73) ─────────────────────────────────────────────────
+// Same 28-position bank upload layout as above, but the receiver is a statutory payee (Income Tax Dept, GST dept, PF ...) and the
+// three payment-details positions say what is being paid: 15 the head ("TDS u/s 194C"), 16 the period ("Sep 2026"), 17 the payee's
+// registration (TAN / GSTIN / return). Reference (14) is <KIND><batch no digits>-<line>, e.g. TDS2026000001-1. One file = one kind.
+
+/** TDS2026000001-1 : kind + the run number without dashes + the line; at most REFERENCE_MAX characters. */
+export function statutoryReference(batch, item) {
+  const ref = `${alnum(batch.kind)}${alnum(String(batch.batch_no ?? "").replace(/^SB/i, ""))}-${item.line_no}`;
+  return ref.slice(0, REFERENCE_MAX);
+}
+
+/**
+ * @param batch  { batch_no, batch_date, kind, file_name, file_type } - the statutory run
+ * @param items  statutory_batch_item rows in file order ({ line_no, amount, mode, payee_name, account_no, ifsc, bank_name, branch_name, reference_no, head_name, period_label })
+ * @returns { fileName, mimeType, content, lineCount, totalAmount }
+ */
+export function buildStatutoryFile(batch, items, layoutDef) {
+  if (batch.file_type !== FILE_TYPES.BANK_UPLOAD) throw new Error(`Cannot write a payment file of type ${batch.file_type ?? "(none)"}.`);
+  if (!batch.file_name) throw new Error(`Statutory run ${batch.batch_no} has no file name - was a bank account chosen for it?`);
+  const rows = [...items].sort((a, b) => a.line_no - b.line_no);
+  // OLD built-in statutory layout (commented out - the Bank File Format master is used instead):
+  // const content = rows.map((i) => {
+  //   const f = new Array(POSITION_COUNT).fill("");
+  //   f[0] = TRANSFER_TYPE[String(i.mode ?? "").toUpperCase()];
+  //   if (!f[0]) throw new Error(`${i.head_name}: ${i.mode} is not a mode the bank file carries.`);
+  //   f[2] = cell(i.account_no);
+  //   f[3] = money(i.amount);
+  //   f[4] = cell(i.payee_name).slice(0, NAME_MAX).trimEnd();
+  //   f[13] = statutoryReference(batch, i);
+  //   [f[14], f[15], f[16]] = [cut(i.head_name, DETAIL_MAX), cut(i.period_label, DETAIL_MAX), cut(i.reference_no, DETAIL_MAX)];
+  //   f[22] = ddmmyyyy(batch.batch_date);
+  //   f[24] = cell(i.ifsc).toUpperCase();
+  //   f[25] = cell(i.bank_name);
+  //   f[26] = cell(i.branch_name);
+  //   return f.join(",");
+  // }).join("\n");
+  requireLayout(layoutDef, batch);
+  const sender = layoutDef.sender ?? {};
+  const lines = rows.map((i, k) => {
+    if (!TRANSFER_TYPE[String(i.mode ?? "").toUpperCase()]) throw new Error(`${i.head_name}: ${i.mode} is not a mode the bank file carries.`);
+    return {
+      paymentDate: batch.batch_date,
+      values: {
+        TRANSFER_TYPE: TRANSFER_TYPE[String(i.mode).toUpperCase()], MODE: String(i.mode).toUpperCase(), ACCOUNT_NO: cell(i.account_no), AMOUNT: money(i.amount),
+        BENEFICIARY_NAME: cell(i.payee_name), REFERENCE: statutoryReference(batch, i), PAYMENT_NO: cell(batch.batch_no), SUPPLIER_CODE: "",
+        DETAIL_1: cut(i.head_name, DETAIL_MAX), DETAIL_2: cut(i.period_label, DETAIL_MAX), DETAIL_3: cut(i.reference_no, DETAIL_MAX),
+        IFSC: cell(i.ifsc).toUpperCase(), BANK_NAME: cell(i.bank_name), BRANCH_NAME: cell(i.branch_name), SERIAL_NO: String(k + 1),
+        SENDER_ACCOUNT_NO: cell(batch.sender_account_no), SENDER_NAME: cell(sender.ac_holder_name), SENDER_IFSC: cell(sender.ifsc).toUpperCase(),
+        SENDER_BANK_NAME: cell(batch.sender_bank_name), SENDER_CLIENT_CODE: cell(batch.sender_client_code), SENDER_EMAIL: cell(batch.sender_alert_email),
+      },
+    };
+  });
+  return {
+    fileName: batch.file_name, mimeType: "text/plain;charset=utf-8", content: renderFile(layoutDef.format, layoutDef.columns, lines), lineCount: rows.length,
+    totalAmount: Math.round(rows.reduce((s, i) => s + Number(i.amount), 0) * 100) / 100,
   };
 }
 

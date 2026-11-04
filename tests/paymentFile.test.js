@@ -1,7 +1,13 @@
 // paymentFile.js - the bank payment file of a Payment Run: 28 comma separated positions per NEFT / RTGS transfer, no header,
 // only real bank transfers, and nothing in a value that could shift a position.
 import { describe, it, expect } from "@jest/globals";
-import { buildPaymentFile, buildVerificationSheet, referenceOf, invoiceText, kindText, deductionText, POSITION_COUNT, FILE_TYPES } from "../src/paymentnet/paymentFile.js";
+import * as real from "../src/paymentnet/paymentFile.js";
+import { STD_LAYOUT } from "./fixtures/standardLayout.js";
+
+// the file is written only from a Bank File Format; these tests look at the standard one
+const { buildVerificationSheet, referenceOf, invoiceText, kindText, deductionText, POSITION_COUNT, FILE_TYPES } = real;
+const buildPaymentFile = (b, i, l = [], layout = STD_LAYOUT) => real.buildPaymentFile(b, i, l, layout);
+const buildStatutoryFile = (b, i, layout = STD_LAYOUT) => real.buildStatutoryFile(b, i, layout);
 
 const batch = (over = {}) => ({
   batch_no: "PB-2026-000007", batch_date: new Date("2026-10-22T00:00:00.000Z"), file_type: FILE_TYPES.BANK_UPLOAD,
@@ -245,5 +251,50 @@ describe("buildVerificationSheet - what the auditor checks the bank screen again
     const r = sheetFor([item({ payment_sno: 70, supplier_invoice_nos: "S-9", amount: 100, tds_amount: null })], []);
     expect(r.lineCount).toBe(1);
     expect(r.content).toContain("S-9");
+  });
+});
+
+describe("buildStatutoryFile - the statutory bank upload file", () => {
+  const sBatch = (over = {}) => ({ batch_no: "SB-2026-000001", batch_date: new Date("2026-10-28T00:00:00.000Z"), kind: "TDS", file_type: FILE_TYPES.BANK_UPLOAD, file_name: "SPACETEX_SPA311_SPA3112810.1000", ...over });
+  const sItem = (over = {}) => ({
+    line_no: 1, amount: 9520, mode: "NEFT", payee_name: "Income Tax Department", account_no: "000111222", ifsc: "sbin0000001", bank_name: "SBI", branch_name: "Main",
+    reference_no: "CHEN12345A", head_name: "TDS u/s 194LA", period_label: "Oct 2026", ...over,
+  });
+
+  it("writes the same 28-position layout: type, account, amount, name, reference, head / period / registration, date, bank", () => {
+    const f = buildStatutoryFile(sBatch(), [sItem()]);
+    expect(f.fileName).toBe("SPACETEX_SPA311_SPA3112810.1000");
+    expect(f.lineCount).toBe(1);
+    const p = fields(f.content);
+    expect(p).toHaveLength(POSITION_COUNT);
+    expect(p[0]).toBe("N");
+    expect(p[2]).toBe("000111222");
+    expect(p[3]).toBe("9520.00");
+    expect(p[4]).toBe("Income Tax Departmen");                  // cut to 20 positions
+    expect(p[13]).toBe("TDS2026000001-1");
+    expect([p[14], p[15], p[16]]).toEqual(["TDS u/s 194LA", "Oct 2026", "CHEN12345A"]);
+    expect(p[22]).toBe("28/10/2026");
+    expect([p[24], p[25], p[26]]).toEqual(["SBIN0000001", "SBI", "Main"]);
+  });
+
+  it("keeps the lines in file order, totals them, and RTGS is R", () => {
+    const f = buildStatutoryFile(sBatch({ kind: "GST" }), [sItem({ line_no: 2, amount: 100.5, mode: "RTGS" }), sItem({ line_no: 1, amount: 50 })]);
+    const rows = lines(f);
+    expect(rows.map((l) => fields(l)[13])).toEqual(["GST2026000001-1", "GST2026000001-2"]);
+    expect(fields(rows[1])[0]).toBe("R");
+    expect(f.totalAmount).toBe(150.5);
+    expect(f.content.endsWith("\n")).toBe(false);
+  });
+
+  it("turns a comma or line break in a value into a space so no position shifts", () => {
+    const f = buildStatutoryFile(sBatch(), [sItem({ head_name: "TDS, 194C\nJuly" })]);
+    expect(fields(f.content)).toHaveLength(POSITION_COUNT);
+    expect(fields(f.content)[14]).toBe("TDS 194C July");
+  });
+
+  it("refuses a run with no file name, an unknown file type, or a mode the bank does not carry", () => {
+    expect(() => buildStatutoryFile(sBatch({ file_name: null }), [sItem()])).toThrow(/no file name/);
+    expect(() => buildStatutoryFile(sBatch({ file_type: "CSV" }), [sItem()])).toThrow(/type CSV/);
+    expect(() => buildStatutoryFile(sBatch(), [sItem({ mode: "UPI" })])).toThrow(/not a mode/);
   });
 });

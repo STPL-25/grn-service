@@ -26,6 +26,7 @@ class Gstr2bRepository {
   rows(filters) { return this.exec("sp_nt_Gstr2bGetRows", filters); }
   candidates(row_sno) { return this.exec("sp_nt_Gstr2bCandidates", { row_sno }); }
   confirmSupplier(payload) { return this.exec("sp_nt_Gstr2bConfirmSupplier", payload); }
+  editRow(payload) { return this.exec("sp_nt_Gstr2bEditRow", payload); }
   skipRow(payload) { return this.exec("sp_nt_Gstr2bSkipRow", payload); }
   missingIn2B() { return this.exec("sp_nt_Gstr2bMissingIn2B"); }
   setHoldOverride(payload) { return this.exec("sp_nt_SetInvoiceHoldOverride", payload); }

@@ -844,7 +844,7 @@ BEGIN
                 END
             END
             SELECT @pb_type = file_type, @pb_prefix = file_prefix, @pb_client = client_code, @pb_file_code = file_code,
-                   @pb_bank = bank_name, @pb_acno = ac_number
+                   @pb_email = alert_email, @pb_bank = bank_name, @pb_acno = ac_number
             FROM dbo.payment_bank_master WHERE payment_bank_sno = @pb;
             IF @pb_type <> 'BANK_UPLOAD' THROW 56114, N'This bank account has a payment file type the run cannot write yet.', 1;
         END

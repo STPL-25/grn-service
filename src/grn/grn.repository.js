@@ -30,7 +30,29 @@ class GRNRepository {
   }
 
   async getGRNsByPO(po_basic_sno, hierarchyJson) {
-    return this.executeStoredProcedure("sp_nt_GetGRNsByPO", { po_basic_sno, hierarchy: hierarchyJson ?? [] });
+    const grns = await this.executeStoredProcedure("sp_nt_GetGRNsByPO", { po_basic_sno, hierarchy: hierarchyJson ?? [] });
+    return this.withInvoiceDetails(grns);
+  }
+
+  // The GRN history shows the supplier invoice uploaded with each GRN (date, amount, taxable value, document). The list procedure
+  // only returns the invoice no, so the rest is read here; never fails the list.
+  async withInvoiceDetails(grns) {
+    const ids = (grns ?? []).map((g) => g.grn_basic_sno).filter(Boolean);
+    if (!ids.length) return grns;
+    try {
+      const pool = await initializeDatabase();
+      const read = (taxable) => pool.request().query(
+        `SELECT grn_basic_sno, CONVERT(VARCHAR(10), invoice_date, 120) AS invoice_date, invoice_amount, invoice_doc_url${taxable ? ", invoice_taxable_value" : ""}
+         FROM dbo.grn_basic_info WHERE grn_basic_sno IN (${ids.map(Number).join(",")})`);
+      const r = await read(true).catch(() => read(false));   // invoice_taxable_value exists from sql/75
+      const by = new Map(r.recordset.map((x) => [x.grn_basic_sno, x]));
+      return grns.map((g) => {
+        const x = by.get(g.grn_basic_sno);
+        return x ? { ...g, invoice_date: x.invoice_date, invoice_amount: x.invoice_amount, invoice_doc_url: x.invoice_doc_url, invoice_taxable_value: x.invoice_taxable_value } : g;
+      });
+    } catch {
+      return grns;
+    }
   }
 
   async createGRN(grnData) {
