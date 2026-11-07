@@ -53,3 +53,25 @@ export async function createInAppNotification({ ecno, type = "info", title, mess
     return { sent: false, reason: err.message };
   }
 }
+
+/**
+ * Bell notification inside the /Supplier portal. `supplier_sno` is the supplier's kyc_basic_info_sno (the
+ * vendor_sno on POs, notes and payments); notification-service builds the recipient key from it. `data.view`
+ * tells the portal which screen to open ('debit-notes' | 'payments' | ...). Never throws: { sent, reason? }.
+ */
+export async function notifySupplier({ supplier_sno, type = "info", title, message, data }) {
+  if (!supplier_sno) return { sent: false, reason: "no supplier_sno" };
+  try {
+    const resp = await fetch(`${NOTIFICATION_SERVICE_URL}/api/notifications`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-internal-secret": INTERNAL_BROADCAST_SECRET },
+      body: JSON.stringify({ supplier_sno, type, title, message, data }),
+      signal: AbortSignal.timeout(5000),
+    });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) return { sent: false, reason: body.message || `notification-service HTTP ${resp.status}` };
+    return { sent: true, notif: body.data };
+  } catch (err) {
+    return { sent: false, reason: err.message };
+  }
+}

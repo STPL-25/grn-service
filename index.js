@@ -20,6 +20,7 @@ import DebitNoteRouter from "./src/debitnote/debitnote.routes.js";
 import AssetRouter from "./src/asset/asset.routes.js";
 import Gstr2bRouter from "./src/gstr2b/gstr2b.routes.js";
 import PaymentNetRouter from "./src/paymentnet/paymentnet.routes.js";
+import { startSupplierEventsJob, stopSupplierEventsJob } from "./src/supplier/supplierEvents.job.js";
 
 // Mirrors backend-stpl/index.js and gateway/index.js: the env-specific file
 // wins, with plain .env as a fallback for anything it does not define (dotenv
@@ -125,8 +126,13 @@ const server = app.listen(PORT, () => {
   console.log(`[${SERVICE_NAME}] listening on port ${PORT}`);
 });
 
+// Supplier-portal bell for debit / credit notes and payments (sql/88). Polls the DB, so it needs no hook at
+// the many places these are created.
+startSupplierEventsJob();
+
 async function shutdown(signal) {
   console.log(`[${SERVICE_NAME}] ${signal} received — shutting down`);
+  stopSupplierEventsJob();
   server.close(async () => {
     try {
       // Redis integration commented out — will be reintegrated later.

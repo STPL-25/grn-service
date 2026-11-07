@@ -13,6 +13,8 @@ import { loadBankFileLayout } from "./bankFileLayout.js";
 //   POST /run                      pays the ticked amounts of ONE kind from one of the company's bank accounts -> run + the bank file
 //   POST /online-payment           (sql/82) the ticked amounts of ONE online payee were paid on its portal: record how, the challan no and date
 //   GET  /runs  GET /runs/:id/file the earlier runs (bank files and online payments), and a bank run's file again
+//   POST /dues/amount  POST /dues/skip   (sql/96) a due date of an approved Statutory agreement (Service Agreement screen):
+//                                  enter its amount (Unfixed) -> an Open amount, or skip it with the reason
 const StatutoryRouter = express.Router();
 
 const userOf = (req) => (Array.isArray(req.user) ? req.user[0] : req.user);
@@ -55,6 +57,16 @@ async function requireSchema() {
   if (r.recordset[0]?.p == null || r.recordset[0]?.t == null) throw httpError(503, "Statutory payments are not set up in the database yet - run grn-service sql/73, then try again.");
   schemaReady = true;
 }
+// Statutory agreement dues need sql/96 (and backend sql/157).
+let agreementDuesReady = false;
+async function requireAgreementDueSchema() {
+  await requireSchema();
+  if (agreementDuesReady) return;
+  const pool = await initializeDatabase();
+  const r = await pool.request().query("SELECT OBJECT_ID('dbo.sp_nt_EnterStatutoryAgreementAmount') AS p");
+  if (r.recordset[0]?.p == null) throw httpError(503, "Statutory agreement dues are not set up in the database yet - run backend-stpl sql/157 and grn-service sql/96, then try again.");
+  agreementDuesReady = true;
+}
 // Online payees and their payments need sql/82 on top.
 let onlineReady = false;
 async function requireOnlineSchema() {
@@ -72,11 +84,37 @@ const isYes = (v) => v === true || v === "Y" || v === "true" || v === 1 || v ===
 
 StatutoryRouter.get("/payables", attachHierarchyScope, wrap(async (req) => {
   await requireSchema();
-  const [payables = [], gstHeld = []] = await exec("sp_nt_GetStatutoryPayables", {
+  // 3rd result (sql/96): due dates of approved Statutory agreements still waiting for their amount
+  const [payables = [], gstHeld = [], waiting = []] = await exec("sp_nt_GetStatutoryPayables", {
     kind: kindOf(req.query.kind), status: ["Open", "Paid"].includes(req.query.status) ? req.query.status : undefined, hierarchy: req.hierarchyJson,
   }, true);
-  return { payables, gstHeld };
+  return { payables, gstHeld, waiting };
 }, 500));
+
+StatutoryRouter.post("/dues/amount", attachHierarchyScope, wrap(async (req) => {
+  await requireAgreementDueSchema();
+  const b = req.body ?? {};
+  if (!positiveInt(b.cycle_sno)) throw httpError(400, "cycle_sno is required");
+  const amount = Number(b.amount);
+  if (!Number.isFinite(amount) || amount <= 0) throw httpError(400, "Enter an amount above zero");
+  const [row] = await exec("sp_nt_EnterStatutoryAgreementAmount", {
+    cycle_sno: Number(b.cycle_sno), amount: Math.round(amount * 100) / 100,
+    ref_no: typeof b.ref_no === "string" && b.ref_no.trim() ? b.ref_no.trim() : undefined,
+    narration: typeof b.narration === "string" && b.narration.trim() ? b.narration.trim() : undefined,
+    entered_by: callerOf(req), hierarchy: req.hierarchyJson,
+  });
+  return row;
+}));
+
+StatutoryRouter.post("/dues/skip", attachHierarchyScope, wrap(async (req) => {
+  await requireAgreementDueSchema();
+  const b = req.body ?? {};
+  if (!positiveInt(b.cycle_sno)) throw httpError(400, "cycle_sno is required");
+  const [row] = await exec("sp_nt_SkipStatutoryAgreementCycle", {
+    cycle_sno: Number(b.cycle_sno), reason: b.reason, skipped_by: callerOf(req), hierarchy: req.hierarchyJson,
+  });
+  return row;
+}));
 
 StatutoryRouter.post("/payables", attachHierarchyScope, wrap(async (req) => {
   await requireSchema();

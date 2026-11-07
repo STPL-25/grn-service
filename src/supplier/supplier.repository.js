@@ -102,6 +102,111 @@ class SupplierRepository {
     console.log("Fetching debit note detail for supplier:", { kyc_basic_info_sno, debit_note_sno });
     return this.executeStoredProcedure("sp_nt_GetDebitNoteDetailForSupplier", { kyc_basic_info_sno, debit_note_sno });
   }
+
+  // ── Debit / credit note ledgers (sql/87_supplier_note_ledger.sql) ────────────────────────────────────
+  // Errors 58101-58107 are written for the supplier ("None of your debit / credit notes is on that invoice."), so they pass
+  // through as-is instead of being wrapped as "Database error: ...".
+  async runNoteLedger(procedureName, payload) {
+    try {
+      const pool = await initializeDatabase();
+      const request = pool.request();
+      request.input("jsonInput", mssql.NVarChar(mssql.MAX), JSON.stringify(payload));
+      const result = await request.execute(procedureName);
+      return result.recordset;
+    } catch (error) {
+      if (error?.number >= 58100 && error?.number < 58200) throw new Error(error.message);
+      throw new Error(`Database error: ${error.message}`);
+    }
+  }
+
+  async getNoteLedgersForSupplier(kyc_basic_info_sno) {
+    return this.runNoteLedger("sp_nt_GetSupplierNoteLedgers", { kyc_basic_info_sno });
+  }
+
+  async addNoteLedger(payload) {
+    const rows = await this.runNoteLedger("sp_nt_AddSupplierNoteLedger", payload);
+    return rows[0];
+  }
+
+  async removeNoteLedger(kyc_basic_info_sno, ledger_sno) {
+    return this.runNoteLedger("sp_nt_RemoveSupplierNoteLedger", { kyc_basic_info_sno, ledger_sno });
+  }
+
+  // ── Request For Quotation (sql/86_supplier_rfq_portal.sql) ──────────────────────────────────────────
+  // Business-rule failures are THROW 53xxx in the procedures and are written for the supplier ("The response
+  // due date has passed ..."), so they pass through as-is instead of being wrapped as "Database error: ...".
+  async runRfq(procedureName, payload) {
+    try {
+      const pool = await initializeDatabase();
+      const request = pool.request();
+      request.input("jsonInput", mssql.NVarChar(mssql.MAX), JSON.stringify(payload));
+      return await request.execute(procedureName);
+    } catch (error) {
+      if (error?.number >= 53000 && error?.number < 54000) throw new Error(error.message);
+      throw new Error(`Database error: ${error.message}`);
+    }
+  }
+
+  async getRfqsForSupplier(kyc_basic_info_sno) {
+    const result = await this.runRfq("sp_nt_GetRfqsForSupplier", { kyc_basic_info_sno });
+    return result.recordset;
+  }
+
+  // header, items, latest response header, versions, payment-terms choices
+  async getRfqDetailForSupplier(kyc_basic_info_sno, rfq_supplier_sno) {
+    const result = await this.runRfq("sp_nt_GetRfqDetailForSupplier", { kyc_basic_info_sno, rfq_supplier_sno });
+    const [header, items, response, versions, paymentTerms] = result.recordsets;
+    return {
+      header: header?.[0] ?? null,
+      items: items ?? [],
+      response: response?.[0] ?? null,
+      versions: versions ?? [],
+      payment_terms: (paymentTerms ?? []).map((r) => r.payment_terms_name),
+    };
+  }
+
+  async submitRfqResponse(payload) {
+    const result = await this.runRfq("sp_nt_SubmitRfqResponse", payload);
+    return result.recordset[0];
+  }
+
+  async declineRfq(payload) {
+    const result = await this.runRfq("sp_nt_DeclineRfq", payload);
+    return result.recordset[0];
+  }
+
+  // ── Supplier KYC: view my own KYC and change it (sql/92_supplier_kyc_modification.sql) ──────────────────
+  // Errors 58601-58612 are written for the supplier ("Upload the authorization letter for this change."), so they pass through
+  // as-is instead of being wrapped as "Database error: ...".
+  async runKyc(procedureName, payload) {
+    try {
+      const pool = await initializeDatabase();
+      const request = pool.request();
+      request.input("jsonInput", mssql.NVarChar(mssql.MAX), JSON.stringify(payload));
+      return await request.execute(procedureName);
+    } catch (error) {
+      if (error?.number >= 58600 && error?.number < 58700) throw new Error(error.message);
+      throw new Error(`Database error: ${error.message}`);
+    }
+  }
+
+  // head (+ snapshot JSON and its hash), the changes made so far, business types, bank account types
+  async getOwnKyc(kyc_basic_info_sno) {
+    const result = await this.runKyc("sp_nt_GetSupplierOwnKyc", { kyc_basic_info_sno });
+    const [head, history, businessTypes, accountTypes] = result.recordsets;
+    return { head: head?.[0] ?? null, history: history ?? [], businessTypes: businessTypes ?? [], accountTypes: accountTypes ?? [] };
+  }
+
+  // sql/93: saves a change REQUEST (status P, waiting for the approval stages) - the live KYC changes only when the last stage approves
+  async modifyKyc(payload) {
+    const result = await this.runKyc("sp_nt_SupplierModifyKyc", payload);
+    return result.recordset[0];
+  }
+
+  async withdrawKyc(payload) {
+    const result = await this.runKyc("sp_nt_WithdrawKycChange", payload);
+    return result.recordset[0];
+  }
 }
 
 export default SupplierRepository;

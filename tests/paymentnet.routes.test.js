@@ -293,6 +293,52 @@ describe("GET /entries", () => {
     expect(sentTo("sp_nt_GetPaymentEntries").view).toBe("mine");
   });
 
+  it("a supplier paid on its own portal carries the payment instructions from its KYC; bank payments are left as they are", async () => {
+    execute.mockImplementation(async (proc) => (proc === "sp_nt_GetPaymentEntries"
+      ? { recordset: [], recordsets: [[
+          { payment_sno: 51, vendor_sno: 122, pay_via_portal: true, payment_portal_name: "Acme Pay", payment_portal_url: "https://pay.acme.example" },
+          { payment_sno: 52, vendor_sno: 7, pay_via_portal: false, payment_portal_name: null, payment_portal_url: null },
+          { payment_sno: 53, vendor_sno: 130, pay_via_portal: true, payment_portal_name: "Beta", payment_portal_url: "beta.example" },
+        ], [], []] }
+      : { recordset: [], recordsets: [[]] }));
+    query.mockImplementationOnce(async () => ({ recordset: [{ vendor_sno: 122, payment_instructions: "Pay with the invoice no. as reference" }] }));
+    const res = await getJson("/entries?view=run");
+    expect(input.mock.calls.find(([name]) => name === "vendors")[2]).toBe("[122,130]");   // only the portal suppliers are looked up
+    const [acme, bank, beta] = res.data.entries;
+    expect(acme.payment_instructions).toBe("Pay with the invoice no. as reference");
+    expect(beta.payment_instructions).toBeNull();                 // portal supplier that gave no instructions
+    expect(bank).not.toHaveProperty("payment_instructions");
+  });
+
+  it("a portal supplier whose details the payments team changed (sql/91) says who did it last", async () => {
+    execute.mockImplementation(async (proc) => (proc === "sp_nt_GetPaymentEntries"
+      ? { recordset: [], recordsets: [[
+          { payment_sno: 51, vendor_sno: 107, pay_via_portal: true, payment_portal_name: "AWS Billing", payment_portal_url: "https://console.aws.amazon.com/billing" },
+          { payment_sno: 53, vendor_sno: 130, pay_via_portal: true, payment_portal_name: "Beta", payment_portal_url: "https://beta.example" },
+        ], [], []] }
+      : { recordset: [], recordsets: [[]] }));
+    query.mockImplementationOnce(async () => ({
+      recordset: [], recordsets: [
+        [{ vendor_sno: 107, payment_instructions: "Pay by card" }, { vendor_sno: 130, payment_instructions: null }],
+        [{ vendor_sno: 107, portal_edited_by: "KTM1148", portal_edited_at: "2026-11-06T13:10:00.000Z" }],
+      ],
+    }));
+    const [aws, beta] = (await getJson("/entries?view=run")).data.entries;
+    expect(aws).toMatchObject({ payment_instructions: "Pay by card", portal_edited_by: "KTM1148", portal_edited_at: "2026-11-06T13:10:00.000Z" });
+    expect(beta).not.toHaveProperty("portal_edited_by");
+  });
+
+  it("the Payment Run list still loads when the portal instructions cannot be read", async () => {
+    execute.mockImplementation(async (proc) => (proc === "sp_nt_GetPaymentEntries"
+      ? { recordset: [], recordsets: [[{ payment_sno: 51, vendor_sno: 122, pay_via_portal: true, payment_portal_name: "Acme Pay" }], [], []] }
+      : { recordset: [], recordsets: [[]] }));
+    query.mockImplementationOnce(async () => { throw new Error("Invalid column name 'payment_instructions'."); });
+    const res = await getJson("/entries?view=run");
+    expect(res.success).toBe(true);
+    expect(res.data.entries[0]).toMatchObject({ payment_sno: 51, payment_portal_name: "Acme Pay" });
+    expect(res.data.entries[0]).not.toHaveProperty("payment_instructions");
+  });
+
   it("one payment's detail is 404 when it is not visible to the caller", async () => {
     execute.mockResolvedValue({ recordsets: [[], [], []], recordset: [] });
     const res = await fetch(`${base}/entries/77`);
@@ -552,6 +598,34 @@ describe("portal payments and TDS records", () => {
     expect(broadcast).not.toHaveBeenCalled();
   });
 
+  it("editing portal details says to run sql/91 until it is applied", async () => {
+    query.mockImplementationOnce(async () => ({ recordset: [{ p: null }] }));
+    const res = await fetch(`${base}/run/portal-details`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payment_sno: 51, payment_portal_name: "X", payment_portal_url: "https://x.example" }) });
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/sql\/91/);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("changes a portal supplier's portal details as the caller, under their org scope, and tells the live screens", async () => {
+    const row = { payment_sno: 51, payment_no: "PAY-51", vendor_sno: 107, payment_portal_name: "AWS Billing", payment_portal_url: "https://console.aws.amazon.com/billing",
+      payment_instructions: null, portal_edited_by: "TEST001", com_sno: 1, div_sno: 3, brn_sno: 4, dept_sno: 16 };
+    execute.mockResolvedValue({ recordset: [row], recordsets: [[row]] });
+    const res = await postJson("/run/portal-details", { payment_sno: "51", payment_portal_name: "AWS Billing", payment_portal_url: "https://console.aws.amazon.com/billing",
+      payment_instructions: 42, changed_by: "SOMEONE" });
+    expect(res.data).toMatchObject({ portal_edited_by: "TEST001" });
+    expect(sentTo("sp_nt_UpdateSupplierPortalDetails")).toEqual({ payment_sno: 51, payment_portal_name: "AWS Billing",
+      payment_portal_url: "https://console.aws.amazon.com/billing", changed_by: "TEST001", hierarchy });   // non-text instructions dropped, login from the session
+    expect(broadcast.mock.calls.find(([, e]) => e === "payment:updated")[2]).toMatchObject({ payment_sno: 51, status: "Approved", portal_details: true });
+  });
+
+  it("editing portal details needs a payment and shows the SQL reason", async () => {
+    expect((await postJson("/run/portal-details", { payment_portal_name: "X" })).error).toMatch(/payment_sno/);
+    execute.mockRejectedValue(new Error("This supplier is paid by bank transfer, not on a portal - its bank details are changed in KYC."));
+    const res = await postJson("/run/portal-details", { payment_sno: 52, payment_portal_name: "X", payment_portal_url: "https://x.example" });
+    expect(res.error).toMatch(/bank transfer/);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
   it("lists recorded portal payments and TDS records under the caller's scope", async () => {
     execute.mockResolvedValue({ recordset: [{ x: 1 }], recordsets: [[{ x: 1 }]] });
     expect((await getJson("/run/portal-payments")).data).toEqual([{ x: 1 }]);
@@ -561,6 +635,15 @@ describe("portal payments and TDS records", () => {
     expect(sentTo("sp_nt_GetPortalPayments")).toEqual({ hierarchy, limit: 1000 });
     await getJson("/tds-records?vendor_sno=122");
     expect(sentTo("sp_nt_GetTdsRecords")).toEqual({ hierarchy, vendor_sno: 122 });
+  });
+
+  it("lists who typed which TDS rate (sql/84): one invoice, or the newest entries under the caller's scope", async () => {
+    execute.mockResolvedValue({ recordset: [{ log_sno: 3 }], recordsets: [[{ log_sno: 3 }]] });
+    expect((await getJson("/tds-rate-log?invoice_sno=64")).data).toEqual([{ log_sno: 3 }]);
+    expect(sentTo("sp_nt_GetTdsRateLog")).toEqual({ hierarchy, invoice_sno: 64, limit: 200 });
+    execute.mockClear(); input.mockClear();
+    await getJson("/tds-rate-log?limit=99999");
+    expect(sentTo("sp_nt_GetTdsRateLog")).toEqual({ hierarchy, limit: 1000 });
   });
 });
 
@@ -588,7 +671,30 @@ describe("statutory payments (/statutory)", () => {
     execute.mockResolvedValue({ recordset: [], recordsets: [[{ stat_sno: 1 }], [{ invoice_no: "INV-1", gst_amount: 18 }]] });
     const res = await getJson("/statutory/payables?kind=gst&status=Open");
     expect(sentTo("sp_nt_GetStatutoryPayables")).toEqual({ kind: "GST", status: "Open", hierarchy });
-    expect(res.data).toEqual({ payables: [{ stat_sno: 1 }], gstHeld: [{ invoice_no: "INV-1", gst_amount: 18 }] });
+    expect(res.data).toEqual({ payables: [{ stat_sno: 1 }], gstHeld: [{ invoice_no: "INV-1", gst_amount: 18 }], waiting: [] });
+  });
+
+  it("passes on the agreement due dates waiting for an amount (sql/96, 3rd result)", async () => {
+    execute.mockResolvedValue({ recordset: [], recordsets: [[], [], [{ cycle_sno: 7, agreement_no: "AGR-2026-0029" }]] });
+    const res = await getJson("/statutory/payables?kind=OTHER");
+    expect(res.data.waiting).toEqual([{ cycle_sno: 7, agreement_no: "AGR-2026-0029" }]);
+  });
+
+  it("enters an agreement due's amount as the caller, rounded to paise, and refuses a bad one before the database", async () => {
+    execute.mockResolvedValue({ recordset: [{ stat_sno: 11, cycle_sno: 7 }], recordsets: [[{ stat_sno: 11, cycle_sno: 7 }]] });
+    const ok = await postJson("/statutory/dues/amount", { cycle_sno: "7", amount: "48250.505", ref_no: "  CHLN-1 ", narration: " " });
+    expect(ok.data).toEqual({ stat_sno: 11, cycle_sno: 7 });
+    expect(sentTo("sp_nt_EnterStatutoryAgreementAmount")).toEqual({ cycle_sno: 7, amount: 48250.51, ref_no: "CHLN-1", entered_by: "TEST001", hierarchy });
+    execute.mockClear();
+    expect((await postJson("/statutory/dues/amount", { cycle_sno: 7, amount: 0 })).error).toMatch(/above zero/);
+    expect((await postJson("/statutory/dues/amount", { amount: 5 })).error).toMatch(/cycle_sno/);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("skips an agreement due with the caller and the reason", async () => {
+    execute.mockResolvedValue({ recordset: [{ cycle_sno: 7 }], recordsets: [[{ cycle_sno: 7 }]] });
+    await postJson("/statutory/dues/skip", { cycle_sno: 7, reason: "no bill this month" });
+    expect(sentTo("sp_nt_SkipStatutoryAgreementCycle")).toEqual({ cycle_sno: 7, reason: "no bill this month", skipped_by: "TEST001", hierarchy });
   });
 
   it("an unknown kind or status is simply not filtered on", async () => {

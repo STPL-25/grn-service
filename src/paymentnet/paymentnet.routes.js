@@ -16,8 +16,10 @@ import StatutoryRouter from "./statutory.routes.js";
 //                                                            -> 'Approved' | 'Rejected' | stays 'Pending Approval' with the next approver
 //   POST /cancel   withdraws a payment that is not paid yet   -> 'Cancelled'
 //   GET  /entries  the approval screen and the Payment Run list (approved payments waiting for money, MSME / due dates)
+//   GET  /tds-rate-log  who typed which TDS rate on which invoice (sql/84)
 //   GET  /run/senders  the company/division/branch bank accounts a run can be paid from (Payment Bank master, sql/138)
 //   POST /run/proceed  pays the ticked payments against today's fund plan from one of them: batch, journals, and the bank payment file (sql/68)
+//   POST /run/portal-details  adds / fixes a portal supplier's portal name, address and instructions from a waiting payment (sql/91, logged)
 //   POST /run/batches/:id/reverse-file[/preview]  the bank's answer to that file (sql/83): UTRs on what it paid; what it rejected /
 //                      returned goes back to Payment Run (journal reversed) - POST /run/change-mode then changes how it is paid
 // sp_nt_ReleasePaymentNet with preview=true returns the figures without saving.
@@ -192,9 +194,44 @@ PaymentNetRouter.get("/entries", attachHierarchyScope, wrap(async (req) => {
   const linesOut = lines.map((l) => ({ ...l, gst_held: held.get(l.invoice_sno) ?? 0 }));
   const heldBy = new Map();
   for (const l of linesOut) heldBy.set(l.payment_sno, (heldBy.get(l.payment_sno) ?? 0) + l.gst_held);
-  const entriesOut = await withBankFailures((await withGroups(entries)).map((e) => ({ ...e, gst_held: heldBy.get(e.payment_sno) ?? 0 })));
+  const entriesOut = await withPortalDetails(await withBankFailures((await withGroups(entries)).map((e) => ({ ...e, gst_held: heldBy.get(e.payment_sno) ?? 0 }))));
   return { entries: entriesOut, lines: linesOut, settings: Object.fromEntries(settings.map((s) => [s.setting_key, s.setting_value])) };
 }, 500));
+
+// A supplier paid on their own portal (KYC "pay via portal", backend sql/109) also carries the payment instructions it gave in KYC,
+// so "Pay on supplier portals" can show what to do there next to the portal link, and - once the payments team has changed its
+// portal details on Payment Run (sql/91) - who did that last and when (portal_edited_by / portal_edited_at). Read-only; never
+// throws - without it the list still shows, just without instructions. Before sql/91 there is no log, so no "edited by".
+async function withPortalDetails(entries) {
+  const vendors = [...new Set(entries.filter((e) => e.pay_via_portal && e.vendor_sno != null).map((e) => Number(e.vendor_sno)))];
+  if (vendors.length === 0) return entries;
+  try {
+    const pool = await initializeDatabase();
+    const r = await pool.request()
+      .input("vendors", mssql.NVarChar(mssql.MAX), JSON.stringify(vendors))
+      .query(`DECLARE @v TABLE (vendor_sno INT PRIMARY KEY);
+              INSERT INTO @v SELECT DISTINCT TRY_CAST(value AS INT) FROM OPENJSON(@vendors) WHERE TRY_CAST(value AS INT) IS NOT NULL;
+              SELECT k.kyc_basic_info_sno AS vendor_sno, NULLIF(LTRIM(RTRIM(k.payment_instructions)), '') AS payment_instructions
+              FROM dbo.kyc_basic_info k JOIN @v v ON v.vendor_sno = k.kyc_basic_info_sno;
+              IF OBJECT_ID('dbo.kyc_portal_detail_log', 'U') IS NOT NULL
+                  SELECT x.vendor_sno, x.changed_by AS portal_edited_by, x.changed_at AS portal_edited_at
+                  FROM (SELECT l.kyc_basic_info_sno AS vendor_sno, l.changed_by, l.changed_at,
+                               ROW_NUMBER() OVER (PARTITION BY l.kyc_basic_info_sno ORDER BY l.log_sno DESC) AS rn
+                        FROM dbo.kyc_portal_detail_log l JOIN @v v ON v.vendor_sno = l.kyc_basic_info_sno) x
+                  WHERE x.rn = 1;`);
+    const [details = r.recordset ?? [], edits = []] = r.recordsets ?? [];
+    const by = new Map(details.map((x) => [Number(x.vendor_sno), x.payment_instructions ?? null]));
+    const edited = new Map(edits.map((x) => [Number(x.vendor_sno), x]));
+    return entries.map((e) => {
+      if (!e.pay_via_portal) return e;
+      const last = edited.get(Number(e.vendor_sno));
+      return { ...e, payment_instructions: by.get(Number(e.vendor_sno)) ?? null,
+        ...(last ? { portal_edited_by: last.portal_edited_by, portal_edited_at: last.portal_edited_at } : {}) };
+    });
+  } catch {
+    return entries;
+  }
+}
 
 // A payment waiting in Payment Run because the bank rejected / returned it in an earlier run (sql/83) carries `bank_failure`: the
 // run, the bank's reason and whether the supplier's KYC account changed since. Never throws - before sql/83 nothing has failed.
@@ -363,6 +400,27 @@ PaymentNetRouter.post("/run/portal-payment", attachHierarchyScope, wrap(async (r
   broadcastPaymentUpdated({ payment_sno: row.payment_sno, payment_no: row.payment_no, status: "Processed", com_sno, div_sno, brn_sno, dept_sno }, { portal: true });
   return row;
 }));
+// A portal supplier's portal details (name, address, instructions - sql/91), added or fixed by the payments team from a payment
+// waiting in Payment Run: the same access as recording that payment. Only portal suppliers; every change is logged with the old
+// values and the caller's login (never a login from the body). Other open Payment Run screens reload on the broadcast.
+let portalEditReady = false;
+PaymentNetRouter.post("/run/portal-details", attachHierarchyScope, wrap(async (req) => {
+  const b = req.body ?? {};
+  if (!positiveInt(b.payment_sno)) throw httpError(400, "payment_sno is required");
+  if (!portalEditReady) {
+    const pool = await initializeDatabase();
+    const r = await pool.request().query("SELECT OBJECT_ID('dbo.sp_nt_UpdateSupplierPortalDetails') AS p");
+    if (r.recordset[0]?.p == null) throw httpError(503, "Editing portal details is not set up in the database yet - run grn-service sql/91, then try again.");
+    portalEditReady = true;
+  }
+  const text = (v) => (typeof v === "string" ? v : undefined);
+  const [row] = await exec("sp_nt_UpdateSupplierPortalDetails", {
+    payment_sno: Number(b.payment_sno), payment_portal_name: text(b.payment_portal_name), payment_portal_url: text(b.payment_portal_url),
+    payment_instructions: text(b.payment_instructions), changed_by: callerOf(req), hierarchy: req.hierarchyJson,
+  });
+  broadcastPaymentUpdated({ ...row, status: "Approved" }, { portal_details: true });
+  return row;
+}));
 // ?limit= (default 50, at most 1000): Payment history lists the portal payments next to the bank runs
 PaymentNetRouter.get("/run/portal-payments", attachHierarchyScope, wrap((req) => exec("sp_nt_GetPortalPayments", {
   hierarchy: req.hierarchyJson, limit: Math.min(positiveInt(req.query.limit) ?? 50, 1000),
@@ -370,6 +428,13 @@ PaymentNetRouter.get("/run/portal-payments", attachHierarchyScope, wrap((req) =>
 // TDS taken on each invoice: invoice, supplier (deductee), company + TAN (deductor), section, rate, base, amount
 PaymentNetRouter.get("/tds-records", attachHierarchyScope, wrap(
   (req) => exec("sp_nt_GetTdsRecords", { hierarchy: req.hierarchyJson, vendor_sno: positiveInt(req.query.vendor_sno) ?? undefined }), 500));
+// Who (which login) typed which TDS rate on which invoice, newest first (sql/84). ?invoice_sno= for one invoice (Payment page "history");
+// without it the newest entries under the caller's org scope. The login stored is the server-side caller, never a value from the body.
+PaymentNetRouter.get("/tds-rate-log", attachHierarchyScope, wrap(
+  (req) => exec("sp_nt_GetTdsRateLog", {
+    hierarchy: req.hierarchyJson, invoice_sno: positiveInt(req.query.invoice_sno) ?? undefined, vendor_sno: positiveInt(req.query.vendor_sno) ?? undefined,
+    limit: Math.min(positiveInt(req.query.limit) ?? 200, 1000),
+  }), 500));
 
 // A batch as the screen gets it: the sender's account number is cut to its last 4 digits.
 const publicBatch = ({ sender_account_no, ...batch }) => ({ ...batch, sender_ac_last4: sender_account_no ? String(sender_account_no).slice(-4) : null });
